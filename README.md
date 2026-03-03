@@ -109,10 +109,3 @@ pytest tests/test_simulation.py
 
 See `requirements.txt` for complete list.
 
-## License
-
-[Specify your license here]
-
-## Contributing
-
-[Contributing guidelines if applicable]
