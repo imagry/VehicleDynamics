@@ -83,3 +83,86 @@ Creates parameter randomization ranges centered on fitted parameters.
 **Methods:**
 - `from_fitted_params(fitted: FittedVehicleParams, spread_pct: float = 0.1) -> CenteredRandomizationConfig`
 - `to_extended_randomization_dict() -> Dict`
+
+## Command-Line Scripts
+
+### `scripts/simulate_trip.py`
+
+Run vehicle simulation with fitted parameters.
+
+**Usage:**
+```bash
+python scripts/simulate_trip.py \
+    --params <fitted_params.json> \
+    --output <output.npz> \
+    [--trip-data <trip_data.pt>] \
+    [--duration <seconds>] \
+    [--dt <seconds>] \
+    [--plot] \
+    [--plot-output <path.png>]
+```
+
+**Arguments:**
+- `--params` (required): Path to fitted parameters JSON file
+- `--output` (required): Output path for simulation results (.npz file)
+- `--trip-data` (optional): Path to trip data .pt file to simulate from. If not provided, runs synthetic simulation.
+- `--duration` (optional): Simulation duration in seconds (default: 60.0, only for synthetic simulation)
+- `--dt` (optional): Time step in seconds (default: 0.1)
+- `--plot` (optional): Generate comprehensive plots of all simulation states
+- `--plot-output` (optional): Output path for plot figure (default: `<output_path>.png`)
+
+**Output:**
+- `.npz` file containing all simulation states (time, speed, acceleration, motor states, forces, torques, etc.)
+- If `--plot` is enabled, a PNG file with 15 subplots showing all internal states
+
+**Plot Contents:**
+The plot includes 15 subplots in a single column, all sharing the x-axis (time):
+1. Actuations (throttle, brake)
+2. Vehicle Speed
+3. Acceleration
+4. Road Grade
+5. Motor Angular Speed
+6. Motor Current (with limits)
+7. Motor Voltage (commanded, back-EMF, limits)
+8. Motor Drive Torque (with limits)
+9. Motor Power (with limits)
+10. Brake Torque (with limits)
+11. Creep Torque
+12. Forces (tire, drag, rolling, grade, net)
+13. Wheel Angular Speed and Slip Ratio
+14. Vehicle Position
+15. Status Flags (held by brakes, coupling enabled)
+
+## Examples
+
+### `examples/basic_simulation.py`
+
+Basic simulation example demonstrating vehicle dynamics.
+
+**Usage:**
+```bash
+python examples/basic_simulation.py \
+    [--plot] \
+    [--plot-output <path.png>] \
+    [--duration <seconds>] \
+    [--dt <seconds>]
+```
+
+**Arguments:**
+- `--plot` (optional): Generate comprehensive plots of all simulation states
+- `--plot-output` (optional): Output path for plot figure (default: `simulation_results.png`)
+- `--duration` (optional): Simulation duration in seconds (default: 10.0)
+- `--dt` (optional): Time step in seconds (default: 0.1)
+
+**Description:**
+This example creates a vehicle with default parameters and runs a simple simulation:
+- First half: 50% throttle (acceleration)
+- Second half: 50% brake (deceleration)
+
+The example demonstrates how to:
+- Create vehicle parameters
+- Initialize and run a simulation
+- Collect and visualize all internal states
+
+**Plot Output:**
+Same comprehensive 15-subplot visualization as `scripts/simulate_trip.py` (see above).
