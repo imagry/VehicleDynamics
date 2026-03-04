@@ -14,9 +14,11 @@ from tkinter import messagebox, ttk
 from typing import Dict, Optional, Tuple
 
 import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from scipy import signal
 
 from fitting.fitter import FitterConfig, VehicleParamFitter
 
@@ -388,6 +390,13 @@ class FittingGUI:
         ttk.Label(opt_frame, text="Plant Substeps:").grid(row=11, column=2, sticky=tk.W, pady=2, padx=(10, 0))
         self.plant_substeps_var = tk.StringVar(value="2")
         ttk.Entry(opt_frame, textvariable=self.plant_substeps_var, width=10).grid(row=11, column=3, sticky=tk.W, padx=5)
+
+        self.apply_lpf_to_fitting_data_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt_frame,
+            text="Apply LPF to fitting data (accel: 2Hz, speed: 5Hz)",
+            variable=self.apply_lpf_to_fitting_data_var,
+        ).grid(row=13, column=4, columnspan=2, sticky=tk.W, pady=2, padx=(10, 0))
 
         # Actuator smoothing/deadband
         ttk.Label(opt_frame, text="Actuator Smoothing α:").grid(row=12, column=0, sticky=tk.W, pady=2)
@@ -882,7 +891,7 @@ class FittingGUI:
         self._update_simulation_plots_callback(param_array)
 
     def _compute_validation_rmse(self) -> None:
-        """Compute speed RMSE over all validation segments using the same loss computation as optimization."""
+        """Open validation analysis window with detailed plots and statistics."""
         try:
             params_dict = self._get_params_from_gui()
             if params_dict is None:
@@ -934,52 +943,531 @@ class FittingGUI:
                 messagebox.showerror("Validation Error", "No validation segments available")
                 return
 
-            # Get dt from segments for time calculations
-            dt = val_segments[0].dt if val_segments else 0.1
-            
-            # If random fixed-length batches are enabled, sample batches like during optimization
-            # Match the same logic as optimization: use random batches if both flags are enabled
-            if config.use_random_segment_batches and config.use_fixed_length_validation:
-                target_len = max(config.random_segment_length, config.min_segment_length)
-                batch_size = max(len(val_segments), config.random_batches_per_epoch)
-                rng = np.random.default_rng(42)  # Use fixed seed for reproducibility
-                val_segments = fitter._sample_fixed_length_batch(
-                    val_segments,
-                    batch_size,
-                    target_len,
-                    rng,
-                )
-                length_sec = target_len * dt
-                segment_info = f"Random fixed-length batches: {len(val_segments)} batches of {target_len} timesteps ({length_sec:.1f} s)"
-            else:
-                min_len_sec = config.min_segment_length * dt
-                max_len_sec = config.max_segment_length * dt
-                segment_info = f"Validation segments: {len(val_segments)}\nSegment length: {config.min_segment_length}-{config.max_segment_length} timesteps ({min_len_sec:.1f}-{max_len_sec:.1f} s)\n{'Whole trips' if config.use_whole_trips else 'Split segments'}"
-
-            # Use the same loss computation as optimization (includes weighting, boosts, etc.)
-            # This uses the same GPU/CPU path as optimization, so should be equally fast
-            mse = fitter._trajectory_loss(param_array, val_segments)
-            weighted_rmse = np.sqrt(mse)
-            
-            # Also compute pure speed RMSE for comparison
-            total_se = 0.0
-            total_count = 0
-            for seg in val_segments:
-                v_sim, _ = fitter._simulate_segment(param_array, seg)
-                err = v_sim - seg.speed
-                total_se += float(np.sum(err * err))
-                total_count += int(seg.length)
-            pure_speed_rmse = np.sqrt(total_se / max(total_count, 1))
-            
-            messagebox.showinfo(
-                "Validation RMSE",
-                f"{segment_info}\n\n"
-                f"Weighted RMSE (matches optimization): {weighted_rmse:.4f} m/s\n"
-                f"Pure speed RMSE: {pure_speed_rmse:.4f} m/s",
-            )
+            # Open validation analysis menu
+            self._show_validation_analysis_window(fitter, param_array, val_segments)
         except Exception:
             LOGGER.exception("Failed to compute validation RMSE")
             messagebox.showerror("Validation Error", "Failed to compute validation RMSE")
+
+    def _show_validation_analysis_window(
+        self,
+        fitter: VehicleParamFitter,
+        param_array: np.ndarray,
+        val_segments: list,
+    ) -> None:
+        """Open a menu window to select which validation segments to visualize."""
+        # Get dt from segments
+        dt = val_segments[0].dt if val_segments else 0.1
+
+        # Segment lengths in seconds
+        segment_lengths_sec = [5.0, 10.0, 15.0, 25.0, 50.0]
+        segment_lengths_timesteps = [int(length_sec / dt) for length_sec in segment_lengths_sec]
+
+        # Precompute analysis data for each segment length
+        analysis_data = {}
+        for length_sec, length_ts in zip(segment_lengths_sec, segment_lengths_timesteps):
+            rng = np.random.default_rng(42)
+            fixed_segments = fitter._sample_fixed_length_batch(
+                val_segments,
+                min(100, len(val_segments) * 2),
+                length_ts,
+                rng,
+            )
+            if not fixed_segments:
+                continue
+
+            segment_errors = []
+            for seg in fixed_segments:
+                # Completely filter out segments where more than 10% of samples are near zero speed
+                zero_speed_eps = 0.1  # m/s threshold for zero speed
+                zero_frac = float(np.sum(np.abs(seg.speed) < zero_speed_eps)) / max(len(seg.speed), 1)
+                if zero_frac > 0.10:
+                    continue
+
+                v_sim, a_sim = fitter._simulate_segment(param_array, seg)
+                v_err = v_sim - seg.speed
+                a_err = a_sim - seg.acceleration
+                v_rmse = np.sqrt(np.mean(v_err ** 2))
+                a_rmse = np.sqrt(np.mean(a_err ** 2))
+                v_mae = np.mean(np.abs(v_err))
+                a_mae = np.mean(np.abs(a_err))
+                segment_errors.append(
+                    {
+                        "segment": seg,
+                        "v_sim": v_sim,
+                        "a_sim": a_sim,
+                        "v_err": v_err,
+                        "a_err": a_err,
+                        "v_rmse": v_rmse,
+                        "a_rmse": a_rmse,
+                        "v_mae": v_mae,
+                        "a_mae": a_mae,
+                    }
+                )
+
+            if not segment_errors:
+                continue
+
+            # Overall statistics
+            all_v_err = np.concatenate([se["v_err"] for se in segment_errors])
+            all_a_err = np.concatenate([se["a_err"] for se in segment_errors])
+            all_v_gt = np.concatenate([se["segment"].speed for se in segment_errors])
+            all_grade = np.concatenate([se["segment"].grade for se in segment_errors])
+
+            overall_v_rmse = float(np.sqrt(np.mean(all_v_err ** 2)))
+            overall_a_rmse = float(np.sqrt(np.mean(all_a_err ** 2)))
+            overall_v_mae = float(np.mean(np.abs(all_v_err)))
+            overall_a_mae = float(np.mean(np.abs(all_a_err)))
+            overall_v_std = float(np.std(all_v_err))
+            overall_a_std = float(np.std(all_a_err))
+
+            # Speed range statistics
+            speed_ranges = [
+                (0.0, 2.0, "0-2 m/s"),
+                (2.0, 5.0, "2-5 m/s"),
+                (5.0, 10.0, "5-10 m/s"),
+                (10.0, 20.0, "10-20 m/s"),
+                (20.0, np.inf, "20+ m/s"),
+            ]
+            speed_range_stats = []
+            for v_min, v_max, label in speed_ranges:
+                mask = (all_v_gt >= v_min) & (all_v_gt < v_max)
+                if np.sum(mask) > 0:
+                    v_err_range = all_v_err[mask]
+                    a_err_range = all_a_err[mask]
+                    speed_range_stats.append(
+                        {
+                            "label": label,
+                            "count": int(np.sum(mask)),
+                            "v_rmse": float(np.sqrt(np.mean(v_err_range ** 2))),
+                            "a_rmse": float(np.sqrt(np.mean(a_err_range ** 2))),
+                            "v_mae": float(np.mean(np.abs(v_err_range))),
+                            "a_mae": float(np.mean(np.abs(a_err_range))),
+                            "v_std": float(np.std(v_err_range)),
+                            "a_std": float(np.std(a_err_range)),
+                        }
+                    )
+
+            # Collect per-segment metrics for scatter plots
+            segment_v_rmse = [se["v_rmse"] for se in segment_errors]
+            segment_a_rmse = [se["a_rmse"] for se in segment_errors]
+            segment_avg_grade = [np.mean(se["segment"].grade) for se in segment_errors]
+            
+            analysis_data[length_sec] = {
+                "length_ts": length_ts,
+                "segment_errors": segment_errors,
+                "overall": {
+                    "v_rmse": overall_v_rmse,
+                    "a_rmse": overall_a_rmse,
+                    "v_mae": overall_v_mae,
+                    "a_mae": overall_a_mae,
+                    "v_std": overall_v_std,
+                    "a_std": overall_a_std,
+                },
+                "ranges": speed_range_stats,
+                "segment_v_rmse": segment_v_rmse,
+                "segment_a_rmse": segment_a_rmse,
+                "segment_avg_grade": segment_avg_grade,
+            }
+
+        if not analysis_data:
+            messagebox.showerror("Validation Analysis", "No valid segments for analysis.")
+            return
+
+        # Helper to choose a segment based on metric and mode
+        # All segments in analysis_data are already filtered to have <=10% zero-speed samples
+        def select_segment(length_sec: float, metric: str, mode: str, enforce_zero_speed_filter: bool = False):
+            data = analysis_data.get(length_sec)
+            if data is None:
+                return None
+            segment_list = data["segment_errors"]
+            if not segment_list:
+                return None
+
+            segment_list = sorted(segment_list, key=lambda se: se[metric])
+            if mode == "best":
+                return segment_list[0]
+            if mode == "worst":
+                return segment_list[-1]
+            if mode == "median":
+                return segment_list[len(segment_list) // 2]
+            return None
+
+        # Create menu window
+        menu = tk.Toplevel(self.root)
+        menu.title("Validation Analysis Menu")
+        menu.geometry("1000x900")
+
+        info_label = tk.Label(
+            menu,
+            text="Select which validation segment to display.\n"
+            "Each selection opens a new window with speed, acceleration, actuation, and road grade for a single segment.\n"
+            "All subplots share the same time axis.",
+            justify="left",
+            font=("Arial", 12),
+        )
+        info_label.pack(side=tk.TOP, anchor="w", padx=10, pady=10)
+        
+        # Add summary table button at the top
+        summary_btn = ttk.Button(
+            menu,
+            text="View Summary Table",
+            command=lambda: self._show_validation_summary_table(analysis_data),
+            style="Large.TButton"
+        )
+        summary_btn.pack(side=tk.TOP, padx=10, pady=10)
+
+        container = ttk.Frame(menu)
+        container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Configure larger button font style
+        style = ttk.Style()
+        style.configure("Large.TButton", font=("Arial", 11))
+
+        # Create controls per segment length
+        for length_sec in segment_lengths_sec:
+            if length_sec not in analysis_data:
+                continue
+            data = analysis_data[length_sec]
+            # Create frame with larger title label
+            frame = ttk.Frame(container)
+            frame.pack(side=tk.TOP, fill=tk.X, expand=False, padx=5, pady=5)
+            title_label = tk.Label(frame, text=f"Segment length: {length_sec:.1f} s", 
+                                  font=("Arial", 12, "bold"))
+            title_label.pack(side=tk.TOP, anchor="w", padx=5, pady=5)
+            content_frame = ttk.Frame(frame)
+            content_frame.pack(side=tk.TOP, fill=tk.X, expand=False)
+
+            overall = data["overall"]
+            stats_lines = [
+                f"Overall speed RMSE: {overall['v_rmse']:.4f} m/s, MAE: {overall['v_mae']:.4f} m/s",
+                f"Overall accel RMSE: {overall['a_rmse']:.4f} m/s², MAE: {overall['a_mae']:.4f} m/s²",
+            ]
+            stats_label = tk.Label(content_frame, text="\n".join(stats_lines), justify="left", font=("Courier", 12))
+            stats_label.pack(side=tk.TOP, anchor="w", padx=5, pady=5)
+
+            btn_row = ttk.Frame(content_frame)
+            btn_row.pack(side=tk.TOP, fill=tk.X, pady=5)
+
+            def make_button(text: str, metric: str, mode: str, enforce_zero_speed_filter: bool = False):
+                def _on_click(length=length_sec, m=metric, md=mode, zf=enforce_zero_speed_filter):
+                    seg_data = select_segment(length, m, md, enforce_zero_speed_filter=zf)
+                    if seg_data is None:
+                        messagebox.showerror("Validation Analysis", "No suitable segment found for selection.")
+                        return
+                    self._show_validation_segment_window(dt, length, seg_data)
+
+                btn = ttk.Button(btn_row, text=text, command=_on_click, style="Large.TButton")
+                return btn
+
+            # Buttons: best/worst/median by speed RMSE, best/worst/median by accel RMSE
+            make_button("Best speed RMSE", "v_rmse", "best", enforce_zero_speed_filter=True).pack(
+                side=tk.LEFT, padx=3
+            )
+            make_button("Worst speed RMSE", "v_rmse", "worst").pack(side=tk.LEFT, padx=3)
+            make_button("Median speed RMSE", "v_rmse", "median").pack(side=tk.LEFT, padx=3)
+            make_button("Best accel RMSE", "a_rmse", "best").pack(side=tk.LEFT, padx=8)
+            make_button("Worst accel RMSE", "a_rmse", "worst").pack(side=tk.LEFT, padx=3)
+            make_button("Median accel RMSE", "a_rmse", "median").pack(side=tk.LEFT, padx=3)
+
+    def _show_validation_segment_window(
+        self,
+        dt: float,
+        length_sec: float,
+        seg_data: Dict[str, object],
+    ) -> None:
+        """Open a window showing speed, acceleration, and actuation for a single segment."""
+        seg = seg_data["segment"]
+        t = np.arange(len(seg.speed)) * dt
+
+        # Low-pass filter GT speed (slightly - higher cutoff than acceleration)
+        if len(seg.speed) > 3:
+            nyquist = 0.5 / dt
+            cutoff = 5.0  # Higher cutoff for speed (less filtering)
+            normal_cutoff = cutoff / nyquist
+            if normal_cutoff < 1.0:
+                b, a = signal.butter(2, normal_cutoff, btype="low")
+                v_gt_filtered = signal.filtfilt(b, a, seg.speed)
+            else:
+                v_gt_filtered = seg.speed
+        else:
+            v_gt_filtered = seg.speed
+
+        # Low-pass filter GT acceleration
+        if len(seg.acceleration) > 3:
+            nyquist = 0.5 / dt
+            cutoff = 2.0
+            normal_cutoff = cutoff / nyquist
+            if normal_cutoff < 1.0:
+                b, a = signal.butter(2, normal_cutoff, btype="low")
+                a_gt_filtered = signal.filtfilt(b, a, seg.acceleration)
+            else:
+                a_gt_filtered = seg.acceleration
+        else:
+            a_gt_filtered = seg.acceleration
+
+        # Create figure with a single column of subplots sharing x-axis
+        fig = Figure(figsize=(12, 12))
+        fig.suptitle(
+            f"Validation Segment ({length_sec:.1f} s) - "
+            f"v_RMSE={seg_data['v_rmse']:.4f} m/s, v_MAE={seg_data['v_mae']:.4f} m/s, "
+            f"a_RMSE={seg_data['a_rmse']:.4f} m/s², a_MAE={seg_data['a_mae']:.4f} m/s²",
+            fontsize=12,
+        )
+
+        ax_speed = fig.add_subplot(4, 1, 1)
+        ax_accel = fig.add_subplot(4, 1, 2, sharex=ax_speed)
+        ax_act = fig.add_subplot(4, 1, 3, sharex=ax_speed)
+        ax_grade = fig.add_subplot(4, 1, 4, sharex=ax_speed)
+
+        # Speed
+        ax_speed.plot(t, v_gt_filtered, "b-", label="GT Speed (filtered)", linewidth=2)
+        ax_speed.plot(t, seg_data["v_sim"], "r--", label="Sim Speed", linewidth=2)
+        ax_speed.set_ylabel("Speed (m/s)")
+        ax_speed.legend(loc="best", fontsize=9)
+        ax_speed.grid(True, alpha=0.3)
+        ax_speed.set_title(f"Speed - RMSE: {seg_data['v_rmse']:.4f} m/s, MAE: {seg_data['v_mae']:.4f} m/s", fontsize=10)
+
+        # Acceleration
+        ax_accel.plot(t, a_gt_filtered, "g-", label="GT Accel (filtered)", linewidth=2)
+        ax_accel.plot(t, seg_data["a_sim"], "m--", label="Sim Accel", linewidth=2)
+        ax_accel.set_ylabel("Acceleration (m/s²)")
+        ax_accel.legend(loc="best", fontsize=9)
+        ax_accel.grid(True, alpha=0.3)
+        ax_accel.set_title(f"Acceleration - RMSE: {seg_data['a_rmse']:.4f} m/s², MAE: {seg_data['a_mae']:.4f} m/s²", fontsize=10)
+
+        # Actuation
+        ax_act.plot(t, seg.throttle, "orange", label="Throttle (%)", linewidth=2)
+        ax_act.plot(t, seg.brake, "red", label="Brake (%)", linewidth=2)
+        ax_act.set_ylabel("Actuation (%)")
+        ax_act.set_xlabel("Time (s)")
+        ax_act.set_ylim([0, 100])
+        ax_act.legend(loc="best", fontsize=9)
+        ax_act.grid(True, alpha=0.3)
+        ax_act.set_title("Actuation", fontsize=10)
+
+        # Road Grade
+        grade_deg = np.degrees(seg.grade)  # Convert from radians to degrees
+        ax_grade.plot(t, grade_deg, "brown", label="Road Grade", linewidth=2)
+        ax_grade.set_ylabel("Grade (deg)")
+        ax_grade.set_xlabel("Time (s)")
+        ax_grade.legend(loc="best", fontsize=9)
+        ax_grade.grid(True, alpha=0.3)
+        ax_grade.set_title("Road Grade", fontsize=10)
+
+        for ax in (ax_speed, ax_accel, ax_act, ax_grade):
+            for label in ax.get_xticklabels():
+                label.set_rotation(0)
+
+        # Create window for this segment
+        window = tk.Toplevel(self.root)
+        window.title("Validation Segment")
+        window.geometry("1200x1100")
+
+        canvas = FigureCanvasTkAgg(fig, master=window)
+        canvas.draw()
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+
+        toolbar = NavigationToolbar2Tk(canvas, window)
+        toolbar.update()
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+
+    def _show_validation_summary_table(self, analysis_data: Dict) -> None:
+        """Show a summary window with subplots showing error metrics and RMSE vs grade."""
+        window = tk.Toplevel(self.root)
+        window.title("Validation Summary")
+        window.geometry("3200x1200")  # Much wider to match figure
+        
+        # Create matplotlib figure - much wider to prevent overlap
+        fig = Figure(figsize=(32, 12))  # Much wider to prevent value overlap
+        fig.suptitle("Validation Summary - Error Metrics by Segment Length and Speed Range", 
+                     fontsize=14, fontweight='bold')
+        
+        # Create subplots: 3 rows x 3 columns
+        # Row 1: Speed RMSE, Speed MAE, Speed STD by speed range
+        # Row 2: Accel RMSE, Accel MAE, Accel STD by speed range  
+        # Row 3: Overall metrics, RMSE vs Grade scatter
+        # Adjust margins to use more horizontal space
+        from matplotlib.gridspec import GridSpec
+        gs = GridSpec(3, 3, figure=fig, hspace=0.6, wspace=0.6, 
+                              left=0.05, right=0.98, top=0.93, bottom=0.08)
+        
+        segment_lengths = sorted(analysis_data.keys())
+        speed_ranges = ["0-2 m/s", "2-5 m/s", "5-10 m/s", "10-20 m/s"]
+        x_pos = np.arange(len(speed_ranges))
+        width = 0.12  # Narrower bar width to prevent overlap
+        colors = plt.cm.viridis(np.linspace(0, 1, len(segment_lengths)))
+        
+        # Row 1: Speed metrics
+        # Speed RMSE
+        ax1 = fig.add_subplot(gs[0, 0])
+        for i, length_sec in enumerate(segment_lengths):
+            data = analysis_data[length_sec]
+            ranges = data["ranges"]
+            range_dict = {r["label"]: r for r in ranges}
+            values = [range_dict.get(label, {}).get("v_rmse", 0.0) for label in speed_ranges]
+            bars = ax1.bar(x_pos + i * width, values, width, label=f"{length_sec:.0f}s", 
+                          color=colors[i], alpha=0.8)
+            # Add value labels on bars (vertically)
+            for j, (bar, val) in enumerate(zip(bars, values)):
+                if val > 0:
+                    # Place text in the middle of the bar, rotated vertically
+                    ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() / 2,
+                            f'{val:.3f}', ha='center', va='center', fontsize=8, rotation=90)
+        ax1.set_xlabel('Speed Range')
+        ax1.set_ylabel('Speed RMSE (m/s)')
+        ax1.set_title('Speed RMSE by Speed Range')
+        ax1.set_xticks(x_pos + width * (len(segment_lengths) - 1) / 2)
+        ax1.set_xticklabels([r.replace(' m/s', '') for r in speed_ranges], rotation=45, ha='right')
+        ax1.legend(fontsize=8)
+        ax1.grid(True, alpha=0.3, axis='y')
+        
+        # Speed MAE
+        ax2 = fig.add_subplot(gs[0, 1])
+        for i, length_sec in enumerate(segment_lengths):
+            data = analysis_data[length_sec]
+            ranges = data["ranges"]
+            range_dict = {r["label"]: r for r in ranges}
+            values = [range_dict.get(label, {}).get("v_mae", 0.0) for label in speed_ranges]
+            bars = ax2.bar(x_pos + i * width, values, width, label=f"{length_sec:.0f}s", 
+                          color=colors[i], alpha=0.8)
+            for j, (bar, val) in enumerate(zip(bars, values)):
+                if val > 0:
+                    # Place text in the middle of the bar, rotated vertically
+                    ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() / 2,
+                            f'{val:.3f}', ha='center', va='center', fontsize=8, rotation=90)
+        ax2.set_xlabel('Speed Range')
+        ax2.set_ylabel('Speed MAE (m/s)')
+        ax2.set_title('Speed MAE by Speed Range')
+        ax2.set_xticks(x_pos + width * (len(segment_lengths) - 1) / 2)
+        ax2.set_xticklabels([r.replace(' m/s', '') for r in speed_ranges], rotation=45, ha='right')
+        ax2.legend(fontsize=8)
+        ax2.grid(True, alpha=0.3, axis='y')
+        
+        # Speed STD
+        ax3 = fig.add_subplot(gs[0, 2])
+        for i, length_sec in enumerate(segment_lengths):
+            data = analysis_data[length_sec]
+            ranges = data["ranges"]
+            range_dict = {r["label"]: r for r in ranges}
+            values = [range_dict.get(label, {}).get("v_std", 0.0) for label in speed_ranges]
+            bars = ax3.bar(x_pos + i * width, values, width, label=f"{length_sec:.0f}s", 
+                          color=colors[i], alpha=0.8)
+            for j, (bar, val) in enumerate(zip(bars, values)):
+                if val > 0:
+                    # Place text in the middle of the bar, rotated vertically
+                    ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() / 2,
+                            f'{val:.3f}', ha='center', va='center', fontsize=8, rotation=90)
+        ax3.set_xlabel('Speed Range')
+        ax3.set_ylabel('Speed STD (m/s)')
+        ax3.set_title('Speed STD by Speed Range')
+        ax3.set_xticks(x_pos + width * (len(segment_lengths) - 1) / 2)
+        ax3.set_xticklabels([r.replace(' m/s', '') for r in speed_ranges], rotation=45, ha='right')
+        ax3.legend(fontsize=8)
+        ax3.grid(True, alpha=0.3, axis='y')
+        
+        # Row 2: Acceleration metrics
+        # Accel RMSE
+        ax4 = fig.add_subplot(gs[1, 0])
+        for i, length_sec in enumerate(segment_lengths):
+            data = analysis_data[length_sec]
+            ranges = data["ranges"]
+            range_dict = {r["label"]: r for r in ranges}
+            values = [range_dict.get(label, {}).get("a_rmse", 0.0) for label in speed_ranges]
+            bars = ax4.bar(x_pos + i * width, values, width, label=f"{length_sec:.0f}s", 
+                          color=colors[i], alpha=0.8)
+            for j, (bar, val) in enumerate(zip(bars, values)):
+                if val > 0:
+                    # Place text in the middle of the bar, rotated vertically
+                    ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() / 2,
+                            f'{val:.3f}', ha='center', va='center', fontsize=8, rotation=90)
+        ax4.set_xlabel('Speed Range')
+        ax4.set_ylabel('Accel RMSE (m/s²)')
+        ax4.set_title('Accel RMSE by Speed Range')
+        ax4.set_xticks(x_pos + width * (len(segment_lengths) - 1) / 2)
+        ax4.set_xticklabels([r.replace(' m/s', '') for r in speed_ranges], rotation=45, ha='right')
+        ax4.legend(fontsize=8)
+        ax4.grid(True, alpha=0.3, axis='y')
+        
+        # Accel MAE
+        ax5 = fig.add_subplot(gs[1, 1])
+        for i, length_sec in enumerate(segment_lengths):
+            data = analysis_data[length_sec]
+            ranges = data["ranges"]
+            range_dict = {r["label"]: r for r in ranges}
+            values = [range_dict.get(label, {}).get("a_mae", 0.0) for label in speed_ranges]
+            bars = ax5.bar(x_pos + i * width, values, width, label=f"{length_sec:.0f}s", 
+                          color=colors[i], alpha=0.8)
+            for j, (bar, val) in enumerate(zip(bars, values)):
+                if val > 0:
+                    # Place text in the middle of the bar, rotated vertically
+                    ax5.text(bar.get_x() + bar.get_width()/2, bar.get_height() / 2,
+                            f'{val:.3f}', ha='center', va='center', fontsize=8, rotation=90)
+        ax5.set_xlabel('Speed Range')
+        ax5.set_ylabel('Accel MAE (m/s²)')
+        ax5.set_title('Accel MAE by Speed Range')
+        ax5.set_xticks(x_pos + width * (len(segment_lengths) - 1) / 2)
+        ax5.set_xticklabels([r.replace(' m/s', '') for r in speed_ranges], rotation=45, ha='right')
+        ax5.legend(fontsize=8)
+        ax5.grid(True, alpha=0.3, axis='y')
+        
+        # Accel STD
+        ax6 = fig.add_subplot(gs[1, 2])
+        for i, length_sec in enumerate(segment_lengths):
+            data = analysis_data[length_sec]
+            ranges = data["ranges"]
+            range_dict = {r["label"]: r for r in ranges}
+            values = [range_dict.get(label, {}).get("a_std", 0.0) for label in speed_ranges]
+            bars = ax6.bar(x_pos + i * width, values, width, label=f"{length_sec:.0f}s", 
+                          color=colors[i], alpha=0.8)
+            for j, (bar, val) in enumerate(zip(bars, values)):
+                if val > 0:
+                    # Place text in the middle of the bar, rotated vertically
+                    ax6.text(bar.get_x() + bar.get_width()/2, bar.get_height() / 2,
+                            f'{val:.3f}', ha='center', va='center', fontsize=8, rotation=90)
+        ax6.set_xlabel('Speed Range')
+        ax6.set_ylabel('Accel STD (m/s²)')
+        ax6.set_title('Accel STD by Speed Range')
+        ax6.set_xticks(x_pos + width * (len(segment_lengths) - 1) / 2)
+        ax6.set_xticklabels([r.replace(' m/s', '') for r in speed_ranges], rotation=45, ha='right')
+        ax6.legend(fontsize=8)
+        ax6.grid(True, alpha=0.3, axis='y')
+        
+        # Row 3: Overall metrics (spans entire bottom row)
+        # Overall metrics bar chart
+        ax7 = fig.add_subplot(gs[2, :])  # Span all 3 columns
+        metrics = ['v_RMSE', 'v_MAE', 'v_STD', 'a_RMSE', 'a_MAE', 'a_STD']
+        x_metrics = np.arange(len(metrics))
+        for i, length_sec in enumerate(segment_lengths):
+            data = analysis_data[length_sec]
+            overall = data["overall"]
+            values = [
+                overall['v_rmse'], overall['v_mae'], overall['v_std'],
+                overall['a_rmse'], overall['a_mae'], overall['a_std']
+            ]
+            bars = ax7.bar(x_metrics + i * width, values, width, label=f"{length_sec:.0f}s", 
+                          color=colors[i], alpha=0.8)
+            for j, (bar, val) in enumerate(zip(bars, values)):
+                if val > 0:
+                    # Place text in the middle of the bar, rotated vertically
+                    ax7.text(bar.get_x() + bar.get_width()/2, bar.get_height() / 2,
+                            f'{val:.3f}', ha='center', va='center', fontsize=8, rotation=90)
+        ax7.set_xlabel('Metric')
+        ax7.set_ylabel('Value')
+        ax7.set_title('Overall Metrics by Segment Length')
+        ax7.set_xticks(x_metrics + width * (len(segment_lengths) - 1) / 2)
+        ax7.set_xticklabels(metrics, rotation=45, ha='right')
+        ax7.legend(fontsize=8)
+        ax7.grid(True, alpha=0.3, axis='y')
+        
+        # Create canvas and display
+        canvas = FigureCanvasTkAgg(fig, master=window)
+        canvas.draw()
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+        
+        toolbar = NavigationToolbar2Tk(canvas, window)
+        toolbar.update()
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
 
     def _ensure_validation_segment_loaded(self) -> None:
         """Load a validation segment for preview when fitting is not running."""
@@ -1242,6 +1730,7 @@ class FittingGUI:
             config_kwargs["creep_loss_boost"] = float(self.creep_loss_boost_var.get())
             config_kwargs["full_stop_loss_cap_fraction"] = float(self.full_stop_loss_cap_var.get())
             config_kwargs["mask_negative_gt_speed"] = bool(self.mask_negative_speed_var.get())
+            config_kwargs["apply_lpf_to_fitting_data"] = bool(self.apply_lpf_to_fitting_data_var.get())
             config_kwargs["use_whole_trips"] = bool(self.use_whole_trips_var.get())
             config_kwargs["filter_zero_speed_segments"] = bool(self.filter_zero_speed_var.get())
             config_kwargs["disable_segment_filtering"] = bool(self.disable_segment_filter_var.get())
@@ -1840,6 +2329,7 @@ class FittingGUI:
                 "max_iter": self.max_iter_var.get(),
                 "min_segment_length": self.min_segment_length_var.get(),
                 "max_segment_length": self.max_segment_length_var.get(),
+                "apply_lpf_to_fitting_data": self.apply_lpf_to_fitting_data_var.get(),
                 "use_whole_trips": self.use_whole_trips_var.get(),
                 "filter_zero_speed": self.filter_zero_speed_var.get(),
                 "disable_segment_filter": self.disable_segment_filter_var.get(),
@@ -1946,6 +2436,8 @@ class FittingGUI:
                 self.min_segment_length_var.set(settings["min_segment_length"])
             if "max_segment_length" in settings:
                 self.max_segment_length_var.set(settings["max_segment_length"])
+            if "apply_lpf_to_fitting_data" in settings:
+                self.apply_lpf_to_fitting_data_var.set(settings["apply_lpf_to_fitting_data"])
             if "use_whole_trips" in settings:
                 self.use_whole_trips_var.set(settings["use_whole_trips"])
             if "filter_zero_speed" in settings:

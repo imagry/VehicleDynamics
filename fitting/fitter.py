@@ -336,9 +336,12 @@ class FitterConfig:
     
     # === PLANT PARITY SETTINGS ===
     use_extended_plant: bool = True  # use ExtendedPlant dynamics for simulation
-    extended_plant_substeps: int = 2  # substeps per dt (match env config)
+    extended_plant_substeps: int = 1  # substeps per dt (match env config)
     extended_plant_disable_creep: bool = False  # disable creep torque for parity checks
     extended_plant_zero_brake_lag: bool = False  # force brake tau ~0 for parity checks
+    
+    # === DATA PREPROCESSING ===
+    apply_lpf_to_fitting_data: bool = False  # apply low-pass filter to acceleration (2Hz) and speed (5Hz) data during fitting
 
     # === SEGMENT FILTERING ===
     min_speed: float = 0.5  # m/s - minimum speed to include
@@ -947,6 +950,33 @@ class VehicleParamFitter:
             return float(np.median(dts))
         return self.config.dt  # fallback to config default
     
+    def _apply_lpf(self, data: np.ndarray, dt: float, cutoff: float) -> np.ndarray:
+        """Apply low-pass filter to data.
+        
+        Args:
+            data: Input data array
+            dt: Timestep in seconds
+            cutoff: Cutoff frequency in Hz
+            
+        Returns:
+            Filtered data array (or original if filtering fails)
+        """
+        if len(data) <= 3:
+            return data
+        
+        nyquist = 0.5 / dt
+        normal_cutoff = cutoff / nyquist
+        if normal_cutoff >= 1.0:
+            return data
+        
+        try:
+            from scipy import signal
+            b, a = signal.butter(2, normal_cutoff, btype="low")
+            return signal.filtfilt(b, a, data)
+        except Exception:
+            # If filtering fails, return original data
+            return data
+    
     def _create_segments(
         self, trips: Dict[str, Dict[str, np.ndarray]], dt: float
     ) -> List[TripSegment]:
@@ -963,6 +993,11 @@ class VehicleParamFitter:
             th = data["throttle"]
             br = data["brake"]
             grade = data["angle"]
+            
+            # Apply LPF to speed and acceleration if enabled
+            if cfg.apply_lpf_to_fitting_data:
+                v = self._apply_lpf(v, dt, cutoff=5.0)  # 5 Hz cutoff for speed
+                a = self._apply_lpf(a, dt, cutoff=2.0)  # 2 Hz cutoff for acceleration
             
             n = len(v)
             if n < cfg.min_segment_length:
@@ -2982,11 +3017,46 @@ class VehicleParamFitter:
                 else:
                     bounds_opt, x0_opt, _objective, _to_params = _build_objective(bounds, best_params.copy())
 
+                # When using random fixed-length batches, also overfit using random
+                # fixed-length segments from the longest trip, with the same
+                # target length setting.
+                use_random_overfit_batches = cfg.use_random_segment_batches and cfg.random_segment_length > 0
+                if use_random_overfit_batches:
+                    batch_size_overfit = cfg.segments_per_batch if cfg.segments_per_batch > 0 else 1
+                    target_len_overfit = max(cfg.random_segment_length, cfg.min_segment_length)
+
                 for _epoch in range(1, cfg.overfit_longest_trip_epochs + 1):
+                    if use_random_overfit_batches:
+                        batch_segments = self._sample_fixed_length_batch(
+                            [overfit_segment],
+                            batch_size_overfit,
+                            target_len_overfit,
+                            rng,
+                        )
+                        segs_for_epoch = batch_segments
+                    else:
+                        segs_for_epoch = [overfit_segment]
+
+                    if verbose:
+                        seg_len = segs_for_epoch[0].length if segs_for_epoch else 0
+                        if use_random_overfit_batches:
+                            # Calculate how many segments of this length can be extracted from the longest trip
+                            max_segments_from_trip = max(1, overfit_segment.length - target_len_overfit + 1)
+                            print(
+                                f"  [overfit] epoch {_epoch}/{cfg.overfit_longest_trip_epochs} "
+                                f"batch_size={len(segs_for_epoch)} len={seg_len} "
+                                f"(sampling from {max_segments_from_trip} possible segments)"
+                            )
+                        else:
+                            print(
+                                f"  [overfit] epoch {_epoch}/{cfg.overfit_longest_trip_epochs} "
+                                f"using full segment (len={overfit_segment.length})"
+                            )
+
                     result = minimize(
                         _objective,
                         x0_opt,
-                        args=([overfit_segment],),
+                        args=(segs_for_epoch,),
                         method=optimizer_method,
                         jac=use_jac,
                         bounds=bounds_opt,
@@ -3000,6 +3070,18 @@ class VehicleParamFitter:
                         global_best_val_loss = val_loss
                         best_val_loss = val_loss
                         best_params = params_opt.copy()
+
+                        # Treat overfit warmup like a special "epoch 0" for checkpointing
+                        self._save_checkpoint(log_path, best_params, best_val_loss, epoch=0, batch=_epoch - 1)
+                        if verbose:
+                            print(
+                                f"  [overfit] new best val_RMSE={np.sqrt(best_val_loss):.4f} m/s "
+                                f"(epoch {_epoch})"
+                            )
+
+                        # Notify GUI so it can refresh parameter table and simulation plots
+                        if progress_callback is not None:
+                            progress_callback(best_params, best_val_loss)
 
                     x0_opt = result.x
 
