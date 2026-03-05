@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Tuple
 
 import numpy as np
@@ -71,11 +71,11 @@ class CreepParams:
 
 @dataclass(slots=True)
 class ExtendedPlantParams:
-    motor: MotorParams = MotorParams()
-    brake: BrakeParams = BrakeParams()
-    body: BodyParams = BodyParams()
-    wheel: WheelParams = WheelParams()
-    creep: CreepParams = CreepParams()
+    motor: MotorParams = field(default_factory=MotorParams)
+    brake: BrakeParams = field(default_factory=BrakeParams)
+    body: BodyParams = field(default_factory=BodyParams)
+    wheel: WheelParams = field(default_factory=WheelParams)
+    creep: CreepParams = field(default_factory=CreepParams)
 
 
 # ---------------------------------------------------------------------------
@@ -455,25 +455,16 @@ class ExtendedPlant:
         self.motor_current_prev = self.motor_current
         self.drive_torque_prev = self.drive_torque
 
-        # ===== COMPUTE TIRE FORCE AND NET FORCE =====
+        # ===== COMPUTE WHEEL FORCE CHANNELS =====
+        # Raw wheel-contact force channel from post-constraint motor torque and applied brake torque.
+        # This is kept for internal mechanics visibility; reported tire_force/net_force are finalized
+        # later from realized acceleration so that net_force == m * acceleration by construction.
         F_drive = tau_drive_wheel / r_w  # positive forward
 
-        # Tire force is net of drive and brake at wheel
         # tau_brake_wheel is signed (positive opposes forward, negative opposes backward)
-        # F_brake = tau_brake_wheel / r_w (signed brake force at tire contact patch)
+        # F_brake is signed brake force at the tire contact patch.
         F_brake = tau_brake_wheel / r_w
-        
-        # Tire force = Drive - Brake (both signed)
         F_tire_raw = F_drive - F_brake
-        
-        # Apply friction limit
-        self.tire_force = float(np.clip(F_tire_raw, -F_fric_max, F_fric_max))
-
-        # Net longitudinal force
-        self.drag_force = F_drag
-        self.rolling_force = F_roll
-        self.grade_force = F_grade
-        self.net_force = self.tire_force - self.drag_force - self.rolling_force - self.grade_force
 
         # ===== DERIVE VEHICLE STATE FROM MOTOR (SINGLE SOURCE OF TRUTH) =====
         # Speed comes directly from omega_m
@@ -496,6 +487,20 @@ class ExtendedPlant:
             self.acceleration = (v_new - v_old) / max(dt, 1e-6)
         
         self.speed = float(v_new)
+
+        # ===== FINALIZE REPORTED FORCE DIAGNOSTICS (REALIZED STATE) =====
+        # Recompute opposing forces from realized vehicle speed for consistent reporting.
+        # These reported channels are intentionally aligned so that:
+        #   net_force == mass * acceleration
+        #   tire_force == net_force + drag + rolling + grade
+        # which makes tire/net traces directly interpretable against kinematics.
+        v_diag = self.speed
+        self.drag_force = 0.5 * body.air_density * body.drag_area * v_diag * abs(v_diag)
+        roll_factor_diag = min(1.0, abs(v_diag) / v_threshold)
+        self.rolling_force = body.rolling_coeff * body.mass * GRAVITY * roll_factor_diag
+        self.grade_force = body.mass * GRAVITY * np.sin(grade_rad)
+        self.net_force = body.mass * self.acceleration
+        self.tire_force = self.net_force + self.drag_force + self.rolling_force + self.grade_force
 
         # Wheel omega follows motor
         self.wheel_omega = self.motor_omega / N

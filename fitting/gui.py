@@ -20,7 +20,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 from scipy import signal
 
-from fitting.fitter import FitterConfig, VehicleParamFitter
+from fitting.fitter import FitterConfig, TripSegment, VehicleParamFitter
 
 matplotlib.use("TkAgg")
 
@@ -506,6 +506,11 @@ class FittingGUI:
             button_frame, text="Validation RMSE", command=self._compute_validation_rmse
         )
         self.val_rmse_btn.pack(side=tk.LEFT, padx=5)
+
+        self.full_state_btn = ttk.Button(
+            button_frame, text="Full-State", command=self._open_constant_throttle_full_state_window
+        )
+        self.full_state_btn.pack(side=tk.LEFT, padx=5)
         
         # Separator
         ttk.Separator(button_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
@@ -670,10 +675,17 @@ class FittingGUI:
             throttle = float(segment.throttle[t]) / 100.0
             brake = float(segment.brake[t]) / 100.0
             grade = float(segment.grade[t])
+
+            brake_active = brake * 100.0 > fitter.config.brake_deadband_pct
+            if brake_active:
+                action = -brake
+            else:
+                action = throttle
+            action = float(np.clip(action, -1.0, 1.0))
             
             # Step the plant
             plant.step(
-                action=throttle if throttle > 0 else -brake,
+                action=action,
                 grade_rad=grade,
                 dt=segment.dt,
                 substeps=substeps,
@@ -889,6 +901,357 @@ class FittingGUI:
 
         # Update plots (will recreate lines)
         self._update_simulation_plots_callback(param_array)
+
+    def _open_constant_throttle_full_state_window(self) -> None:
+        """Open a detailed full-state viewer for constant-throttle simulation."""
+        if self.motor_model_var.get() != "dc":
+            messagebox.showwarning(
+                "Full-State Viewer",
+                "Full-state viewer requires DC motor model.\nPlease switch Motor Model to 'DC Motor'.",
+            )
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("Constant Throttle Full-State Explorer")
+        window.geometry("1800x1100")
+
+        controls = ttk.LabelFrame(window, text="Simulation Controls", padding=8)
+        controls.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
+
+        ttk.Label(controls, text="Throttle (%):").grid(row=0, column=0, sticky=tk.W, padx=4)
+        throttle_var = tk.DoubleVar(value=50.0)
+        throttle_entry_var = tk.StringVar(value="50.0")
+
+        throttle_scale = ttk.Scale(
+            controls,
+            from_=0.0,
+            to=100.0,
+            variable=throttle_var,
+            orient=tk.HORIZONTAL,
+            length=300,
+        )
+        throttle_scale.grid(row=0, column=1, sticky=tk.W, padx=4)
+
+        throttle_entry = ttk.Entry(controls, textvariable=throttle_entry_var, width=8)
+        throttle_entry.grid(row=0, column=2, sticky=tk.W, padx=4)
+
+        ttk.Label(controls, text="Initial speed (m/s):").grid(row=0, column=3, sticky=tk.W, padx=(16, 4))
+        initial_speed_var = tk.StringVar(value="0.0")
+        ttk.Entry(controls, textvariable=initial_speed_var, width=8).grid(row=0, column=4, sticky=tk.W, padx=4)
+
+        ttk.Label(controls, text="Road grade (deg):").grid(row=0, column=5, sticky=tk.W, padx=(16, 4))
+        grade_deg_var = tk.StringVar(value="0.0")
+        ttk.Entry(controls, textvariable=grade_deg_var, width=8).grid(row=0, column=6, sticky=tk.W, padx=4)
+
+        ttk.Label(controls, text="dt (s):").grid(row=0, column=7, sticky=tk.W, padx=(16, 4))
+        dt_var = tk.StringVar(value="0.1")
+        ttk.Entry(controls, textvariable=dt_var, width=8).grid(row=0, column=8, sticky=tk.W, padx=4)
+
+        ttk.Label(controls, text="Horizon (s):").grid(row=0, column=9, sticky=tk.W, padx=(16, 4))
+        horizon_var = tk.StringVar(value="200.0")
+        ttk.Entry(controls, textvariable=horizon_var, width=8).grid(row=0, column=10, sticky=tk.W, padx=4)
+
+        status_var = tk.StringVar(value="Ready")
+        ttk.Label(controls, textvariable=status_var).grid(row=1, column=0, columnspan=9, sticky=tk.W, padx=4, pady=(8, 0))
+
+        plot_container = ttk.Frame(window)
+        plot_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        toolbar_frame = ttk.Frame(plot_container)
+        toolbar_frame.pack(side=tk.TOP, fill=tk.X)
+
+        fig = Figure(figsize=(18, 12), dpi=100)
+        canvas = FigureCanvasTkAgg(fig, master=plot_container)
+        canvas.draw()
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        toolbar.update()
+
+        def _sync_scale_to_entry(_event=None):
+            try:
+                value = float(throttle_entry_var.get())
+            except ValueError:
+                return
+            value = float(np.clip(value, 0.0, 100.0))
+            throttle_var.set(value)
+            throttle_entry_var.set(f"{value:.2f}")
+
+        def _sync_entry_from_scale(*_args):
+            throttle_entry_var.set(f"{float(throttle_var.get()):.2f}")
+
+        throttle_var.trace_add("write", _sync_entry_from_scale)
+        throttle_entry.bind("<Return>", _sync_scale_to_entry)
+        throttle_entry.bind("<FocusOut>", _sync_scale_to_entry)
+
+        def _run_full_state_simulation():
+            try:
+                params_dict = self._get_params_from_gui()
+                if params_dict is None:
+                    return
+
+                config = self._create_fitter_config()
+                if config.motor_model_type != "dc":
+                    messagebox.showwarning(
+                        "Full-State Viewer",
+                        "Full-state viewer requires DC motor model.\nPlease switch Motor Model to 'DC Motor'.",
+                    )
+                    return
+
+                fitter = VehicleParamFitter(config)
+                param_array = self._params_dict_to_array(
+                    params_dict,
+                    use_init=True,
+                    motor_model_type=config.motor_model_type,
+                )
+
+                throttle_pct = float(np.clip(float(throttle_var.get()) / 100.0, 0.0, 1.0))
+                initial_speed = float(initial_speed_var.get())
+                grade_deg = float(grade_deg_var.get())
+                dt = max(float(dt_var.get()), 1e-3)
+                horizon_s = max(float(horizon_var.get()), 0.1)
+
+                status_var.set(f"Running full simulation ({horizon_s:.1f}s)...")
+                window.update_idletasks()
+
+                time_arr, signals = self._simulate_constant_throttle_full_state(
+                    params=param_array,
+                    fitter=fitter,
+                    throttle_pct=throttle_pct,
+                    horizon_s=horizon_s,
+                    dt=dt,
+                    initial_speed=initial_speed,
+                    grade_deg=grade_deg,
+                )
+
+                self._plot_constant_throttle_full_state(
+                    fig=fig,
+                    time_arr=time_arr,
+                    signals=signals,
+                    throttle_pct=throttle_pct,
+                    horizon_s=horizon_s,
+                    dt=dt,
+                    initial_speed=initial_speed,
+                    grade_deg=grade_deg,
+                )
+                canvas.draw_idle()
+                status_var.set(f"Done ({horizon_s:.1f}s)")
+            except Exception as e:
+                LOGGER.exception("Failed full-state simulation view")
+                status_var.set("Error")
+                messagebox.showerror("Full-State Viewer Error", f"Failed to run simulation:\n{e}")
+
+        run_btn = ttk.Button(controls, text="Run Full Simulation", command=_run_full_state_simulation)
+        run_btn.grid(row=1, column=9, columnspan=2, sticky=tk.E, padx=4, pady=(8, 0))
+
+        _run_full_state_simulation()
+
+    def _simulate_constant_throttle_full_state(
+        self,
+        params: np.ndarray,
+        fitter: VehicleParamFitter,
+        throttle_pct: float,
+        horizon_s: float,
+        dt: float,
+        initial_speed: float,
+        grade_deg: float,
+    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+        """Run detailed full-state simulation under constant throttle for the requested horizon."""
+        from simulation.dynamics import ExtendedPlant
+
+        n_steps = max(int(horizon_s / max(dt, 1e-9)), 2)
+        time_arr = np.arange(n_steps, dtype=np.float64) * dt
+
+        ext_params = fitter._build_extended_plant_params(params)
+        plant = ExtendedPlant(ext_params)
+        plant.reset(speed=initial_speed, position=0.0)
+
+        state_keys = [
+            "speed",
+            "position",
+            "acceleration",
+            "wheel_speed",
+            "brake_torque",
+            "slip_ratio",
+            "action",
+            "motor_current",
+            "motor_omega",
+            "back_emf_voltage",
+            "V_cmd",
+            "i_limit",
+            "drive_torque",
+            "tire_force",
+            "drag_force",
+            "rolling_force",
+            "grade_force",
+            "net_force",
+            "held_by_brakes",
+            "creep_torque",
+            "coupling_enabled",
+        ]
+        signals = {key: np.zeros(n_steps, dtype=np.float64) for key in state_keys}
+
+        def _write_state(idx: int, state) -> None:
+            signals["speed"][idx] = state.speed
+            signals["position"][idx] = state.position
+            signals["acceleration"][idx] = state.acceleration
+            signals["wheel_speed"][idx] = state.wheel_speed
+            signals["brake_torque"][idx] = state.brake_torque
+            signals["slip_ratio"][idx] = state.slip_ratio
+            signals["action"][idx] = state.action
+            signals["motor_current"][idx] = state.motor_current
+            signals["motor_omega"][idx] = state.motor_omega
+            signals["back_emf_voltage"][idx] = state.back_emf_voltage
+            signals["V_cmd"][idx] = state.V_cmd
+            signals["i_limit"][idx] = state.i_limit
+            signals["drive_torque"][idx] = state.drive_torque
+            signals["tire_force"][idx] = state.tire_force
+            signals["drag_force"][idx] = state.drag_force
+            signals["rolling_force"][idx] = state.rolling_force
+            signals["grade_force"][idx] = state.grade_force
+            signals["net_force"][idx] = state.net_force
+            signals["held_by_brakes"][idx] = 1.0 if state.held_by_brakes else 0.0
+            signals["creep_torque"][idx] = state.creep_torque
+            signals["coupling_enabled"][idx] = 1.0 if state.coupling_enabled else 0.0
+
+        _write_state(0, plant.state)
+
+        action = float(np.clip(throttle_pct, 0.0, 1.0))
+        grade_rad = np.deg2rad(grade_deg)
+        substeps = max(int(fitter.config.extended_plant_substeps), 1)
+
+        for t in range(n_steps - 1):
+            state = plant.step(action=action, grade_rad=grade_rad, dt=dt, substeps=substeps)
+            _write_state(t + 1, state)
+
+        wheel_radius = max(ext_params.wheel.radius, 1e-9)
+        signals["wheel_omega"] = signals["wheel_speed"] / wheel_radius
+        signals["electrical_power"] = signals["V_cmd"] * signals["motor_current"]
+        signals["tractive_power"] = signals["tire_force"] * signals["speed"]
+        signals["drag_power"] = signals["drag_force"] * np.abs(signals["speed"])
+        signals["rolling_power"] = signals["rolling_force"] * np.abs(signals["speed"])
+        signals["grade_power"] = signals["grade_force"] * signals["speed"]
+        signals["net_power"] = signals["net_force"] * signals["speed"]
+        signals["jerk"] = np.gradient(signals["acceleration"], dt)
+
+        return time_arr, signals
+
+    def _plot_constant_throttle_full_state(
+        self,
+        fig: Figure,
+        time_arr: np.ndarray,
+        signals: Dict[str, np.ndarray],
+        throttle_pct: float,
+        horizon_s: float,
+        dt: float,
+        initial_speed: float,
+        grade_deg: float,
+    ) -> None:
+        """Render detailed full-state plots for constant-throttle simulation."""
+        fig.clear()
+        axes = fig.subplots(5, 2, sharex=True)
+        ax = axes.flatten()
+
+        ax[0].plot(time_arr, signals["speed"], label="Vehicle Speed")
+        ax[0].plot(time_arr, signals["wheel_speed"], label="Wheel Linear Speed", alpha=0.8)
+        ax[0].set_ylabel("Speed (m/s)")
+        ax[0].set_title("Kinematics")
+        ax[0].legend(fontsize=8)
+        ax[0].grid(True, alpha=0.3)
+
+        ax[1].plot(time_arr, signals["position"], label="Position", color="tab:purple")
+        ax[1].set_ylabel("Position (m)")
+        ax[1].set_title("Position")
+        ax[1].legend(fontsize=8)
+        ax[1].grid(True, alpha=0.3)
+
+        ax[2].plot(time_arr, signals["acceleration"], label="Acceleration", color="tab:green")
+        ax[2].plot(time_arr, signals["jerk"], label="Jerk", color="tab:olive", alpha=0.7)
+        ax[2].set_ylabel("a / jerk")
+        ax[2].set_title("Acceleration and Jerk")
+        ax[2].legend(fontsize=8)
+        ax[2].grid(True, alpha=0.3)
+
+        ax[3].plot(time_arr, signals["motor_current"], label="Motor Current", color="tab:green")
+        ax[3].plot(time_arr, signals["i_limit"], label="Dynamic Current Limit", color="tab:red", linestyle="--")
+        ax[3].set_ylabel("Current (A)")
+        ax[3].set_title("Motor Current Limits")
+        ax[3].legend(fontsize=8)
+        ax[3].grid(True, alpha=0.3)
+
+        ax[4].plot(time_arr, signals["V_cmd"], label="Command Voltage", color="tab:blue")
+        ax[4].plot(time_arr, signals["back_emf_voltage"], label="Back-EMF Voltage", color="tab:orange")
+        ax[4].set_ylabel("Voltage (V)")
+        ax[4].set_title("Electrical Voltages")
+        ax[4].legend(fontsize=8)
+        ax[4].grid(True, alpha=0.3)
+
+        ax[5].plot(time_arr, signals["motor_omega"], label="Motor ω", color="tab:cyan")
+        ax[5].plot(time_arr, signals["wheel_omega"], label="Wheel ω", color="tab:brown")
+        ax[5].set_ylabel("Angular Speed")
+        ax[5].set_title("Rotational Speeds")
+        ax[5].legend(fontsize=8)
+        ax[5].grid(True, alpha=0.3)
+
+        ax[6].plot(time_arr, signals["drive_torque"], label="Drive Torque", color="tab:cyan")
+        ax[6].plot(time_arr, signals["brake_torque"], label="Brake Torque", color="tab:red")
+        ax[6].plot(time_arr, signals["creep_torque"], label="Creep Torque", color="tab:purple")
+        ax[6].set_ylabel("Torque (Nm)")
+        ax[6].set_title("Torque Channels")
+        ax[6].legend(fontsize=8)
+        ax[6].grid(True, alpha=0.3)
+
+        ax[7].plot(time_arr, signals["tire_force"], label="Tire")
+        ax[7].plot(time_arr, signals["drag_force"], label="Drag")
+        ax[7].plot(time_arr, signals["rolling_force"], label="Rolling")
+        ax[7].plot(time_arr, signals["grade_force"], label="Grade")
+        ax[7].plot(time_arr, signals["net_force"], label="Net", linewidth=2, color="k")
+        ax[7].set_ylabel("Force (N)")
+        ax[7].set_title("Longitudinal Forces")
+        ax[7].legend(fontsize=8, ncol=3)
+        ax[7].grid(True, alpha=0.3)
+
+        ax[8].plot(time_arr, signals["electrical_power"], label="Electrical P", color="tab:blue")
+        ax[8].plot(time_arr, signals["tractive_power"], label="Traction P", color="tab:green")
+        ax[8].plot(time_arr, signals["drag_power"], label="Drag Loss P", color="tab:red")
+        ax[8].plot(time_arr, signals["rolling_power"], label="Rolling Loss P", color="tab:orange")
+        ax[8].plot(time_arr, signals["grade_power"], label="Grade P", color="tab:brown")
+        ax[8].plot(time_arr, signals["net_power"], label="Net P", color="k", linewidth=2)
+        ax[8].set_ylabel("Power (W)")
+        ax[8].set_title("Power Flow")
+        ax[8].legend(fontsize=8, ncol=3)
+        ax[8].grid(True, alpha=0.3)
+
+        final_speed = float(signals["speed"][-1])
+        max_speed = float(np.max(signals["speed"]))
+        distance = float(signals["position"][-1])
+        peak_current = float(np.max(signals["motor_current"]))
+        peak_drive_torque = float(np.max(signals["drive_torque"]))
+        peak_brake_torque = float(np.max(signals["brake_torque"]))
+        max_force = float(np.max(np.abs(signals["net_force"])))
+        summary = (
+            f"Summary\n"
+            f"Final speed: {final_speed:.3f} m/s\n"
+            f"Max speed: {max_speed:.3f} m/s\n"
+            f"Distance: {distance:.1f} m\n"
+            f"Peak current: {peak_current:.2f} A\n"
+            f"Peak drive torque: {peak_drive_torque:.2f} Nm\n"
+            f"Peak brake torque: {peak_brake_torque:.2f} Nm\n"
+            f"Max |net force|: {max_force:.2f} N\n"
+            f"Horizon: {horizon_s:.1f} s\n"
+            f"dt: {dt:.3f} s\n"
+            f"Initial speed: {initial_speed:.3f} m/s\n"
+            f"Road grade: {grade_deg:.3f} deg"
+        )
+        ax[9].axis("off")
+        ax[9].text(0.02, 0.98, summary, va="top", ha="left", fontsize=10)
+
+        ax[8].set_xlabel("Time (s)")
+        fig.suptitle(
+            f"Constant-Throttle Full-State Simulation ({horizon_s:.1f} s) | throttle={throttle_pct * 100.0:.2f}%",
+            fontsize=14,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
 
     def _compute_validation_rmse(self) -> None:
         """Open validation analysis window with detailed plots and statistics."""
@@ -1537,68 +1900,19 @@ class FittingGUI:
         current_results = {}
 
         throttle_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-        n_steps = int(duration / dt)
-        time = np.arange(n_steps) * dt
-
-        # Check if we can use ExtendedPlant for state tracking
-        use_extended = (fitter.config.use_extended_plant and 
-                       fitter.config.motor_model_type == "dc")
-        
-        if use_extended:
-            try:
-                from simulation.dynamics import ExtendedPlant
-                ext_params = fitter._build_extended_plant_params(params)
-                
-                for throttle_pct in throttle_values:
-                    plant = ExtendedPlant(ext_params)
-                    plant.reset(speed=0.0)
-                    
-                    speed = np.zeros(n_steps)
-                    power = np.zeros(n_steps)
-                    current = np.zeros(n_steps)
-                    
-                    speed[0] = 0.0
-                    current[0] = plant.motor_current
-                    power[0] = plant.V_cmd * plant.motor_current
-                    
-                    substeps = max(int(fitter.config.extended_plant_substeps), 1)
-                    for t in range(n_steps - 1):
-                        plant.step(
-                            action=throttle_pct,
-                            grade_rad=0.0,
-                            dt=dt,
-                            substeps=substeps,
-                        )
-                        speed[t + 1] = plant.speed
-                        current[t + 1] = plant.motor_current
-                        power[t + 1] = plant.V_cmd * plant.motor_current
-                    
-                    speed_results[throttle_pct] = (time, speed)
-                    power_results[throttle_pct] = (time, power)
-                    current_results[throttle_pct] = (time, current)
-                
-                return speed_results, power_results, current_results
-            except Exception as e:
-                LOGGER.warning(f"Failed to use ExtendedPlant for throttle response: {e}")
-                # Fall through to simple simulation
-        
-        # Fallback: simple simulation without state data
         for throttle_pct in throttle_values:
-            speed = np.zeros(n_steps)
-            throttle_cmd = throttle_pct * 100.0  # Convert to 0-100 scale
-            brake_cmd = 0.0
-            grade = 0.0  # Flat road
-
-            for t in range(n_steps - 1):
-                accel = fitter._compute_acceleration(
-                    params, speed[t], throttle_cmd, brake_cmd, grade
-                )
-                speed[t + 1] = max(speed[t] + accel * dt, 0.0)
-
+            time, speed, power, current = self._simulate_preview_profile(
+                params=params,
+                fitter=fitter,
+                dt=dt,
+                duration=duration,
+                initial_speed=0.0,
+                throttle_pct=throttle_pct,
+                brake_pct=0.0,
+            )
             speed_results[throttle_pct] = (time, speed)
-            # No power/current data available
-            power_results[throttle_pct] = (time, np.zeros_like(time))
-            current_results[throttle_pct] = (time, np.zeros_like(time))
+            power_results[throttle_pct] = (time, power)
+            current_results[throttle_pct] = (time, current)
 
         return speed_results, power_results, current_results
 
@@ -1619,25 +1933,184 @@ class FittingGUI:
         results = {}
 
         brake_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-        n_steps = int(duration / dt)
-        time = np.arange(n_steps) * dt
 
         for brake_pct in brake_values:
-            speed = np.zeros(n_steps)
-            speed[0] = initial_speed
-            throttle_cmd = 0.0
-            brake_cmd = brake_pct * 100.0  # Convert to 0-100 scale
-            grade = 0.0  # Flat road
-
-            for t in range(n_steps - 1):
-                accel = fitter._compute_acceleration(
-                    params, speed[t], throttle_cmd, brake_cmd, grade
-                )
-                speed[t + 1] = max(speed[t] + accel * dt, 0.0)
-
+            time, speed, _power, _current = self._simulate_preview_profile(
+                params=params,
+                fitter=fitter,
+                dt=dt,
+                duration=duration,
+                initial_speed=initial_speed,
+                throttle_pct=0.0,
+                brake_pct=brake_pct,
+            )
             results[brake_pct] = (time, speed)
 
         return results
+
+    def _simulate_preview_profile(
+        self,
+        params: np.ndarray,
+        fitter: VehicleParamFitter,
+        dt: float,
+        duration: float,
+        initial_speed: float,
+        throttle_pct: float,
+        brake_pct: float,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Simulate a constant-input preview profile and return time, speed, power, and current."""
+        n_steps = max(int(duration / dt), 2)
+        time = np.arange(n_steps) * dt
+
+        if fitter.config.motor_model_type == "dc":
+            try:
+                from simulation.dynamics import ExtendedPlant
+
+                ext_params = fitter._build_extended_plant_params(params)
+                plant = ExtendedPlant(ext_params)
+                plant.reset(speed=initial_speed, position=0.0)
+
+                speed = np.zeros(n_steps)
+                power = np.zeros(n_steps)
+                current = np.zeros(n_steps)
+
+                state = plant.state
+                speed[0] = state.speed
+                current[0] = state.motor_current
+                power[0] = state.V_cmd * state.motor_current
+
+                throttle_cmd = float(np.clip(throttle_pct, 0.0, 1.0))
+                brake_cmd = float(np.clip(brake_pct, 0.0, 1.0))
+                brake_active = brake_cmd * 100.0 > fitter.config.brake_deadband_pct
+                action = -brake_cmd if brake_active else throttle_cmd
+                action = float(np.clip(action, -1.0, 1.0))
+                substeps = max(int(fitter.config.extended_plant_substeps), 1)
+
+                for t in range(n_steps - 1):
+                    state = plant.step(
+                        action=action,
+                        grade_rad=0.0,
+                        dt=dt,
+                        substeps=substeps,
+                    )
+                    speed[t + 1] = state.speed
+                    current[t + 1] = state.motor_current
+                    power[t + 1] = state.V_cmd * state.motor_current
+
+                return time, speed, power, current
+            except Exception as e:
+                LOGGER.warning(f"Failed full ExtendedPlant preview simulation: {e}")
+
+        speed_measured = np.full(n_steps, float(initial_speed), dtype=np.float64)
+        segment = TripSegment(
+            trip_id="preview_profile",
+            speed=speed_measured,
+            acceleration=np.zeros(n_steps, dtype=np.float64),
+            throttle=np.full(n_steps, float(np.clip(throttle_pct * 100.0, 0.0, 100.0)), dtype=np.float64),
+            brake=np.full(n_steps, float(np.clip(brake_pct * 100.0, 0.0, 100.0)), dtype=np.float64),
+            grade=np.zeros(n_steps, dtype=np.float64),
+            dt=float(dt),
+        )
+        speed, _ = fitter._simulate_segment(params, segment)
+        power = np.zeros(n_steps)
+        current = np.zeros(n_steps)
+        return time, speed, power, current
+
+    def _simulate_preview_profile_with_state(
+        self,
+        params: np.ndarray,
+        fitter: VehicleParamFitter,
+        dt: float,
+        duration: float,
+        initial_speed: float,
+        throttle_pct: float,
+        brake_pct: float,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+        """Simulate a constant-input preview profile and return time, speed, power, current and state traces."""
+        n_steps = max(int(duration / dt), 2)
+        time = np.arange(n_steps) * dt
+
+        if fitter.config.motor_model_type == "dc":
+            try:
+                from simulation.dynamics import ExtendedPlant
+
+                ext_params = fitter._build_extended_plant_params(params)
+                plant = ExtendedPlant(ext_params)
+                plant.reset(speed=initial_speed, position=0.0)
+
+                speed = np.zeros(n_steps)
+                power = np.zeros(n_steps)
+                current = np.zeros(n_steps)
+                state_traces = {
+                    "drive_torque": np.zeros(n_steps),
+                    "brake_torque": np.zeros(n_steps),
+                    "tire_force": np.zeros(n_steps),
+                    "drag_force": np.zeros(n_steps),
+                    "rolling_force": np.zeros(n_steps),
+                    "grade_force": np.zeros(n_steps),
+                    "net_force": np.zeros(n_steps),
+                }
+
+                state = plant.state
+                speed[0] = state.speed
+                current[0] = state.motor_current
+                power[0] = state.V_cmd * state.motor_current
+                state_traces["drive_torque"][0] = state.drive_torque
+                state_traces["brake_torque"][0] = state.brake_torque
+                state_traces["tire_force"][0] = state.tire_force
+                state_traces["drag_force"][0] = state.drag_force
+                state_traces["rolling_force"][0] = state.rolling_force
+                state_traces["grade_force"][0] = state.grade_force
+                state_traces["net_force"][0] = state.net_force
+
+                throttle_cmd = float(np.clip(throttle_pct, 0.0, 1.0))
+                brake_cmd = float(np.clip(brake_pct, 0.0, 1.0))
+                brake_active = brake_cmd * 100.0 > fitter.config.brake_deadband_pct
+                action = -brake_cmd if brake_active else throttle_cmd
+                action = float(np.clip(action, -1.0, 1.0))
+                substeps = max(int(fitter.config.extended_plant_substeps), 1)
+
+                for t in range(n_steps - 1):
+                    state = plant.step(
+                        action=action,
+                        grade_rad=0.0,
+                        dt=dt,
+                        substeps=substeps,
+                    )
+                    speed[t + 1] = state.speed
+                    current[t + 1] = state.motor_current
+                    power[t + 1] = state.V_cmd * state.motor_current
+                    state_traces["drive_torque"][t + 1] = state.drive_torque
+                    state_traces["brake_torque"][t + 1] = state.brake_torque
+                    state_traces["tire_force"][t + 1] = state.tire_force
+                    state_traces["drag_force"][t + 1] = state.drag_force
+                    state_traces["rolling_force"][t + 1] = state.rolling_force
+                    state_traces["grade_force"][t + 1] = state.grade_force
+                    state_traces["net_force"][t + 1] = state.net_force
+
+                return time, speed, power, current, state_traces
+            except Exception as e:
+                LOGGER.warning(f"Failed full ExtendedPlant state preview simulation: {e}")
+
+        time_basic, speed, power, current = self._simulate_preview_profile(
+            params=params,
+            fitter=fitter,
+            dt=dt,
+            duration=duration,
+            initial_speed=initial_speed,
+            throttle_pct=throttle_pct,
+            brake_pct=brake_pct,
+        )
+        zero_states = {
+            "drive_torque": np.zeros_like(time_basic),
+            "brake_torque": np.zeros_like(time_basic),
+            "tire_force": np.zeros_like(time_basic),
+            "drag_force": np.zeros_like(time_basic),
+            "rolling_force": np.zeros_like(time_basic),
+            "grade_force": np.zeros_like(time_basic),
+            "net_force": np.zeros_like(time_basic),
+        }
+        return time_basic, speed, power, current, zero_states
 
     def _params_dict_to_array(
         self, params_dict: Dict[str, Dict[str, float]], use_init: bool = True, motor_model_type: str = "dc"
@@ -1902,18 +2375,40 @@ class FittingGUI:
             original_model_type = self.motor_model_var.get()
             self.motor_model_var.set(config.motor_model_type)
             
-            throttle_speed, throttle_power, throttle_current = self._simulate_throttle_response(param_array)
-            brake_data = self._simulate_brake_response(param_array)
+            throttle_speed, throttle_power, throttle_current = self._simulate_throttle_response(param_array, fitter=fitter)
+            brake_data = self._simulate_brake_response(param_array, fitter=fitter)
+
+            # Representative full-state profiles for preview force/torque traces
+            state_time, _state_speed, _state_power, _state_current, throttle_state = self._simulate_preview_profile_with_state(
+                params=param_array,
+                fitter=fitter,
+                dt=0.1,
+                duration=40.0,
+                initial_speed=0.0,
+                throttle_pct=1.0,
+                brake_pct=0.0,
+            )
+            brake_state_time, _brake_state_speed, _brake_state_power, _brake_state_current, brake_state = self._simulate_preview_profile_with_state(
+                params=param_array,
+                fitter=fitter,
+                dt=0.1,
+                duration=40.0,
+                initial_speed=20.0,
+                throttle_pct=0.0,
+                brake_pct=1.0,
+            )
             
             # Restore original model type
             self.motor_model_var.set(original_model_type)
 
             # Create and save preview plots
-            preview_fig = Figure(figsize=(10, 14), dpi=100)
-            ax1 = preview_fig.add_subplot(4, 1, 1)
-            ax2 = preview_fig.add_subplot(4, 1, 2)
-            ax3 = preview_fig.add_subplot(4, 1, 3)
-            ax4 = preview_fig.add_subplot(4, 1, 4)
+            preview_fig = Figure(figsize=(10, 20), dpi=100)
+            ax1 = preview_fig.add_subplot(6, 1, 1)
+            ax2 = preview_fig.add_subplot(6, 1, 2)
+            ax3 = preview_fig.add_subplot(6, 1, 3)
+            ax4 = preview_fig.add_subplot(6, 1, 4)
+            ax5 = preview_fig.add_subplot(6, 1, 5)
+            ax6 = preview_fig.add_subplot(6, 1, 6)
 
             for throttle, (time, speed) in throttle_speed.items():
                 ax1.plot(time, speed, label=f"Throttle {throttle:.1f}")
@@ -1962,6 +2457,38 @@ class FittingGUI:
                         ha="center", va="center", transform=ax3.transAxes)
                 ax4.text(0.5, 0.5, "No validation segment data available", 
                         ha="center", va="center", transform=ax4.transAxes)
+
+            if config.motor_model_type == "dc":
+                ax5.plot(state_time, throttle_state["drive_torque"], "c-", label="Drive Torque (Throttle=1.0)")
+                ax5.plot(brake_state_time, brake_state["brake_torque"], "r-", label="Brake Torque (Brake=1.0)")
+                ax5.set_title("Full-State Torques")
+                ax5.set_xlabel("Time (s)")
+                ax5.set_ylabel("Torque (Nm)")
+                ax5.legend(fontsize=8, loc="upper right")
+                ax5.grid(True, alpha=0.3)
+
+                ax6.plot(state_time, throttle_state["tire_force"], "b-", label="Tire")
+                ax6.plot(state_time, throttle_state["drag_force"], "g-", label="Drag")
+                ax6.plot(state_time, throttle_state["rolling_force"], "orange", label="Rolling")
+                ax6.plot(state_time, throttle_state["grade_force"], "brown", label="Grade")
+                ax6.plot(state_time, throttle_state["net_force"], "k-", label="Net", linewidth=2)
+                ax6.set_title("Full-State Forces (Throttle=1.0)")
+                ax6.set_xlabel("Time (s)")
+                ax6.set_ylabel("Force (N)")
+                ax6.legend(fontsize=8, loc="upper right")
+                ax6.grid(True, alpha=0.3)
+            else:
+                ax5.text(0.5, 0.5, "Full-state torque traces require DC motor model", 
+                        ha="center", va="center", transform=ax5.transAxes)
+                ax5.set_title("Full-State Torques")
+                ax5.set_xlabel("Time (s)")
+                ax5.set_ylabel("Torque (Nm)")
+
+                ax6.text(0.5, 0.5, "Full-state force traces require DC motor model", 
+                        ha="center", va="center", transform=ax6.transAxes)
+                ax6.set_title("Full-State Forces")
+                ax6.set_xlabel("Time (s)")
+                ax6.set_ylabel("Force (N)")
 
             preview_fig.tight_layout()
             preview_fig.savefig(output_dir / "simulation_preview.png", dpi=150, bbox_inches="tight")
