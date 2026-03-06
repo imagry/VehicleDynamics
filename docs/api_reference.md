@@ -27,7 +27,6 @@ Vehicle parameter container.
 - `brake`: `BrakeParams` - Brake parameters
 - `body`: `BodyParams` - Body parameters
 - `wheel`: `WheelParams` - Wheel parameters
-- `creep`: `CreepParams` - Creep torque parameters
 
 ## Parameter Fitting
 
@@ -113,10 +112,10 @@ python scripts/simulate_trip.py \
 
 **Output:**
 - `.npz` file containing all simulation states (time, speed, acceleration, motor states, forces, torques, etc.)
-- If `--plot` is enabled, a PNG file with 15 subplots showing all internal states
+- If `--plot` is enabled, a PNG file with 14 subplots showing all internal states
 
 **Plot Contents:**
-The plot includes 15 subplots in a single column, all sharing the x-axis (time):
+The plot includes 14 subplots in a single column, all sharing the x-axis (time):
 1. Actuations (throttle, brake)
 2. Vehicle Speed
 3. Acceleration
@@ -124,14 +123,13 @@ The plot includes 15 subplots in a single column, all sharing the x-axis (time):
 5. Motor Angular Speed
 6. Motor Current (with limits)
 7. Motor Voltage (commanded, back-EMF, limits)
-8. Motor Drive Torque (with limits)
+8. Drive Torque at Wheel (with motor/wheel limit overlays)
 9. Motor Power (with limits)
 10. Brake Torque (with limits)
-11. Creep Torque
-12. Forces (tire, drag, rolling, grade, net)
-13. Wheel Angular Speed and Slip Ratio
-14. Vehicle Position
-15. Status Flags (held by brakes, coupling enabled)
+11. Forces (tire, drag, rolling, grade, net)
+12. Wheel Angular Speed and Slip Ratio
+13. Vehicle Position
+14. Status Flags (held by brakes, coupling enabled)
 
 ## Examples
 
@@ -165,4 +163,4 @@ The example demonstrates how to:
 - Collect and visualize all internal states
 
 **Plot Output:**
-Same comprehensive 15-subplot visualization as `scripts/simulate_trip.py` (see above).
+Same comprehensive 14-subplot visualization as `scripts/simulate_trip.py` (see above).

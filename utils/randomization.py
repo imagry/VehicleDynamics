@@ -23,7 +23,6 @@ from simulation.dynamics import (
     BrakeParams,
     BodyParams,
     WheelParams,
-    CreepParams,
 )
 from utils.capabilities import compute_vehicle_capabilities
 
@@ -56,6 +55,7 @@ class ExtendedPlantRandomization:
     motor_K_range: Tuple[float, float] = (0.05, 0.4)  # Nm/A and V·s/rad - K_t = K_e (log-uniform)
     motor_b_range: Tuple[float, float] = (1e-6, 5e-3)  # Nm·s/rad - viscous friction (log-uniform)
     motor_J_range: Tuple[float, float] = (1e-4, 1e-2)  # kg·m² - rotor inertia (log-uniform)
+    motor_min_current_range: Tuple[float, float] = (0.0, 20.0)  # A - minimum motor current at zero throttle
     motor_Tmax_range: Tuple[float, float] | None = None  # Nm - optional max motor torque
     motor_Pmax_range: Tuple[float, float] | None = None  # W - optional max motor power
 
@@ -75,11 +75,6 @@ class ExtendedPlantRandomization:
 
     # Efficiency
     eta_gb_range: Tuple[float, float] = (0.85, 0.98)  # gearbox efficiency
-    
-    # Creep parameters (optional, None = use fixed default values)
-    creep_a_max: float | None = None  # [m/s²] max creep acceleration (None = use default 0.5)
-    creep_v_cutoff: float | None = None  # [m/s] creep fade speed (None = use default 1.5)
-    creep_v_hold: float | None = None  # [m/s] standstill threshold (None = use default 0.08)
     
     # Feasibility thresholds (for rejection sampling)
     min_accel_from_rest: float = 2.5  # m/s² - minimum required acceleration at standstill
@@ -107,6 +102,7 @@ class ExtendedPlantRandomization:
             # Support both old 'motor_Bm_range' and new 'motor_b_range' keys
             motor_b_range=tuple(vr_config.get('motor_b_range', vr_config.get('motor_Bm_range', (1e-6, 5e-3)))),
             motor_J_range=tuple(vr_config.get('motor_J_range', (1e-4, 1e-2))),
+            motor_min_current_range=tuple(vr_config.get('motor_min_current_range', (0.0, 20.0))),
             motor_Tmax_range=vr_config.get('motor_Tmax_range', vr_config.get('motor_Imax_range')),
             motor_Pmax_range=vr_config.get('motor_Pmax_range'),
             gear_ratio_range=tuple(vr_config.get('gear_ratio_range', (4.0, 20.0))),
@@ -118,10 +114,6 @@ class ExtendedPlantRandomization:
             wheel_radius_range=tuple(vr_config.get('wheel_radius_range', (0.26, 0.38))),
             wheel_inertia_range=tuple(vr_config.get('wheel_inertia_range', (0.5, 5.0))),
             eta_gb_range=tuple(vr_config.get('eta_gb_range', (0.85, 0.98))),
-            # Creep parameters (optional, from top-level 'creep' key if present)
-            creep_a_max=config.get('creep', {}).get('a_max'),
-            creep_v_cutoff=config.get('creep', {}).get('v_cutoff'),
-            creep_v_hold=config.get('creep', {}).get('v_hold'),
             # Feasibility thresholds
             min_accel_from_rest=vr_config.get('min_accel_from_rest', 2.5),
             min_brake_decel=vr_config.get('min_brake_decel', 4.0),
@@ -192,6 +184,8 @@ def sample_extended_params(rng: np.random.Generator, rand: ExtendedPlantRandomiz
         b = _log_uniform(*rand.motor_b_range)
         # J - log-uniform (rotor inertia)
         J = _log_uniform(*rand.motor_J_range)
+        # minimum current - uniform
+        min_current_A = float(rng.uniform(*rand.motor_min_current_range))
         
         # Gearbox parameters (uniform)
         gear_ratio = float(rng.uniform(*rand.gear_ratio_range))
@@ -273,6 +267,7 @@ def sample_extended_params(rng: np.random.Generator, rand: ExtendedPlantRandomiz
             P_max=P_max,
             gear_ratio=gear_ratio,
             eta_gb=eta_gb,
+            min_current_A=min_current_A,
         )
         brake = BrakeParams(
             T_br_max=T_brake_max,
@@ -286,13 +281,7 @@ def sample_extended_params(rng: np.random.Generator, rand: ExtendedPlantRandomiz
             inertia=wheel_inertia,
             v_eps=0.1,  # keep fixed
         )
-        # Creep parameters: use from config if specified, otherwise use defaults
-        creep = CreepParams(
-            a_max=rand.creep_a_max if rand.creep_a_max is not None else 0.5,
-            v_cutoff=rand.creep_v_cutoff if rand.creep_v_cutoff is not None else 1.5,
-            v_hold=rand.creep_v_hold if rand.creep_v_hold is not None else 0.08,
-        )
-        return ExtendedPlantParams(motor=motor, brake=brake, body=body, wheel=wheel, creep=creep)
+        return ExtendedPlantParams(motor=motor, brake=brake, body=body, wheel=wheel)
 
     # Fallback if rejection sampling fails
     raise RuntimeError(f"Could not find suitable parameters after {max_attempts} attempts. "
@@ -409,6 +398,7 @@ class CenteredRandomizationConfig:
     motor_K: float  # Nm/A = V·s/rad - K_t = K_e
     motor_gamma_throttle: float  # throttle nonlinearity exponent
     motor_throttle_tau: float  # s - throttle time constant
+    motor_min_current_A: float  # A - minimum current at zero throttle
     gear_ratio: float  # N - gear reduction ratio
     
     # === BRAKE PARAMETERS (fitted) ===
@@ -466,6 +456,7 @@ class CenteredRandomizationConfig:
             motor_K=fitted.motor_K,
             motor_gamma_throttle=fitted.motor_gamma_throttle,
             motor_throttle_tau=fitted.motor_throttle_tau,
+            motor_min_current_A=fitted.motor_min_current_A,
             gear_ratio=fitted.gear_ratio,
             # Brake params
             brake_T_max=fitted.brake_T_max,
@@ -539,6 +530,12 @@ class CenteredRandomizationConfig:
 
         motor_throttle_tau_range = _make_range(
             self.motor_throttle_tau,
+            motor_spread,
+            enforce_positivity=True,
+        )
+
+        motor_min_current_range = _make_range(
+            self.motor_min_current_A,
             motor_spread,
             enforce_positivity=True,
         )
@@ -647,6 +644,7 @@ class CenteredRandomizationConfig:
                 "motor_J_range": list(motor_J_range),
                 "motor_gamma_throttle_range": list(motor_gamma_throttle_range),
                 "motor_throttle_tau_range": list(motor_throttle_tau_range),
+                "motor_min_current_range": list(motor_min_current_range),
                 "gear_ratio_range": list(gear_ratio_range),
                 "eta_gb_range": list(eta_gb_range),
                 # Brake
@@ -685,6 +683,7 @@ class CenteredRandomizationConfig:
             "motor_K": self.motor_K,
             "motor_gamma_throttle": self.motor_gamma_throttle,
             "motor_throttle_tau": self.motor_throttle_tau,
+            "motor_min_current_A": self.motor_min_current_A,
             "gear_ratio": self.gear_ratio,
             # Brake params
             "brake_T_max": self.brake_T_max,
@@ -712,6 +711,8 @@ class CenteredRandomizationConfig:
     @classmethod
     def from_dict(cls, d: Dict) -> "CenteredRandomizationConfig":
         """Create from dictionary."""
+        d = dict(d)
+        d.setdefault("motor_min_current_A", 0.0)
         return cls(**d)
     
     def save(self, path: Path) -> None:

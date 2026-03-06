@@ -29,18 +29,17 @@ LOGGER = logging.getLogger(__name__)
 # Parameter groups for DC motor model
 PARAM_GROUPS_DC = {
     "Body": ["mass", "drag_area", "rolling_coeff"],
-    "Motor": ["motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_gamma_throttle", "motor_throttle_tau"],
+    "Motor": ["motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_gamma_throttle", "motor_throttle_tau", "motor_min_current_A"],
     "Motor Limits": ["motor_T_max", "motor_P_max"],
     "Drivetrain": ["gear_ratio", "eta_gb"],
     "Brake": ["brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu"],
     "Wheel": ["wheel_radius", "wheel_inertia"],
-    "Creep": ["creep_a_max", "creep_v_cutoff", "creep_v_hold"],
 }
 
 # Parameter groups for polynomial motor model
 PARAM_GROUPS_POLY = {
     "Body": ["mass", "drag_area", "rolling_coeff"],
-    "Motor": ["motor_V_max", "motor_gamma_throttle", "motor_throttle_tau"],
+    "Motor": ["motor_V_max", "motor_gamma_throttle", "motor_throttle_tau", "motor_min_current_A"],
     "Polynomial Coefficients": [
         "poly_c_00", "poly_c_10", "poly_c_01", "poly_c_20", "poly_c_11", "poly_c_02",
         "poly_c_30", "poly_c_21", "poly_c_12", "poly_c_03"
@@ -48,7 +47,6 @@ PARAM_GROUPS_POLY = {
     "Drivetrain": ["gear_ratio", "eta_gb"],
     "Brake": ["brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu"],
     "Wheel": ["wheel_radius", "wheel_inertia"],
-    "Creep": ["creep_a_max", "creep_v_cutoff", "creep_v_hold"],
 }
 
 # Parameter display names and units
@@ -63,6 +61,7 @@ PARAM_DISPLAY = {
     "motor_J": ("Motor J", "kg·m²"),
     "motor_gamma_throttle": ("Throttle γ", ""),
     "motor_throttle_tau": ("Throttle τ", "s"),
+    "motor_min_current_A": ("Motor I_min", "A"),
     "motor_T_max": ("Motor T_max", "Nm"),
     "motor_P_max": ("Motor P_max", "W"),
     "poly_c_00": ("c₀₀ (constant)", ""),
@@ -84,9 +83,6 @@ PARAM_DISPLAY = {
     "mu": ("Friction μ", ""),
     "wheel_radius": ("Wheel Radius", "m"),
     "wheel_inertia": ("Wheel Inertia", "kg·m²"),
-    "creep_a_max": ("Creep a_max", "m/s²"),
-    "creep_v_cutoff": ("Creep v_cutoff", "m/s"),
-    "creep_v_hold": ("Creep v_hold", "m/s"),
 }
 
 
@@ -364,13 +360,9 @@ class FittingGUI:
         self.brake_loss_boost_var = tk.StringVar(value="0.0")
         ttk.Entry(opt_frame, textvariable=self.brake_loss_boost_var, width=10).grid(row=10, column=1, sticky=tk.W, padx=5)
 
-        ttk.Label(opt_frame, text="Creep Loss Boost:").grid(row=10, column=2, sticky=tk.W, pady=2, padx=(10, 0))
-        self.creep_loss_boost_var = tk.StringVar(value="0.0")
-        ttk.Entry(opt_frame, textvariable=self.creep_loss_boost_var, width=10).grid(row=10, column=3, sticky=tk.W, padx=5)
-
-        ttk.Label(opt_frame, text="Full-stop loss cap (fraction):").grid(row=10, column=4, sticky=tk.W, pady=2, padx=(10, 0))
+        ttk.Label(opt_frame, text="Full-stop loss cap (fraction):").grid(row=10, column=2, sticky=tk.W, pady=2, padx=(10, 0))
         self.full_stop_loss_cap_var = tk.StringVar(value="0.0")
-        ttk.Entry(opt_frame, textvariable=self.full_stop_loss_cap_var, width=10).grid(row=10, column=5, sticky=tk.W, padx=5)
+        ttk.Entry(opt_frame, textvariable=self.full_stop_loss_cap_var, width=10).grid(row=10, column=3, sticky=tk.W, padx=5)
 
         self.mask_negative_speed_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -508,9 +500,14 @@ class FittingGUI:
         self.val_rmse_btn.pack(side=tk.LEFT, padx=5)
 
         self.full_state_btn = ttk.Button(
-            button_frame, text="Full-State", command=self._open_constant_throttle_full_state_window
+            button_frame, text="Full-State Throttle", command=self._open_constant_throttle_full_state_window
         )
         self.full_state_btn.pack(side=tk.LEFT, padx=5)
+
+        self.full_state_brake_btn = ttk.Button(
+            button_frame, text="Full-State Brake", command=self._open_constant_brake_full_state_window
+        )
+        self.full_state_brake_btn.pack(side=tk.LEFT, padx=5)
         
         # Separator
         ttk.Separator(button_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
@@ -1046,17 +1043,162 @@ class FittingGUI:
 
         _run_full_state_simulation()
 
-    def _simulate_constant_throttle_full_state(
+    def _open_constant_brake_full_state_window(self) -> None:
+        """Open a detailed full-state viewer for constant-brake simulation."""
+        if self.motor_model_var.get() != "dc":
+            messagebox.showwarning(
+                "Full-State Viewer",
+                "Full-state viewer requires DC motor model.\nPlease switch Motor Model to 'DC Motor'.",
+            )
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("Constant Brake Full-State Explorer")
+        window.geometry("1800x1100")
+
+        controls = ttk.LabelFrame(window, text="Simulation Controls", padding=8)
+        controls.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
+
+        ttk.Label(controls, text="Brake (%):").grid(row=0, column=0, sticky=tk.W, padx=4)
+        brake_var = tk.DoubleVar(value=50.0)
+        brake_entry_var = tk.StringVar(value="50.0")
+
+        brake_scale = ttk.Scale(
+            controls,
+            from_=0.0,
+            to=100.0,
+            variable=brake_var,
+            orient=tk.HORIZONTAL,
+            length=300,
+        )
+        brake_scale.grid(row=0, column=1, sticky=tk.W, padx=4)
+
+        brake_entry = ttk.Entry(controls, textvariable=brake_entry_var, width=8)
+        brake_entry.grid(row=0, column=2, sticky=tk.W, padx=4)
+
+        ttk.Label(controls, text="Initial speed (m/s):").grid(row=0, column=3, sticky=tk.W, padx=(16, 4))
+        initial_speed_var = tk.StringVar(value="20.0")
+        ttk.Entry(controls, textvariable=initial_speed_var, width=8).grid(row=0, column=4, sticky=tk.W, padx=4)
+
+        ttk.Label(controls, text="Road grade (deg):").grid(row=0, column=5, sticky=tk.W, padx=(16, 4))
+        grade_deg_var = tk.StringVar(value="0.0")
+        ttk.Entry(controls, textvariable=grade_deg_var, width=8).grid(row=0, column=6, sticky=tk.W, padx=4)
+
+        ttk.Label(controls, text="dt (s):").grid(row=0, column=7, sticky=tk.W, padx=(16, 4))
+        dt_var = tk.StringVar(value="0.1")
+        ttk.Entry(controls, textvariable=dt_var, width=8).grid(row=0, column=8, sticky=tk.W, padx=4)
+
+        ttk.Label(controls, text="Horizon (s):").grid(row=0, column=9, sticky=tk.W, padx=(16, 4))
+        horizon_var = tk.StringVar(value="120.0")
+        ttk.Entry(controls, textvariable=horizon_var, width=8).grid(row=0, column=10, sticky=tk.W, padx=4)
+
+        status_var = tk.StringVar(value="Ready")
+        ttk.Label(controls, textvariable=status_var).grid(row=1, column=0, columnspan=9, sticky=tk.W, padx=4, pady=(8, 0))
+
+        plot_container = ttk.Frame(window)
+        plot_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        toolbar_frame = ttk.Frame(plot_container)
+        toolbar_frame.pack(side=tk.TOP, fill=tk.X)
+
+        fig = Figure(figsize=(18, 12), dpi=100)
+        canvas = FigureCanvasTkAgg(fig, master=plot_container)
+        canvas.draw()
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        toolbar.update()
+
+        def _sync_scale_to_entry(_event=None):
+            try:
+                value = float(brake_entry_var.get())
+            except ValueError:
+                return
+            value = float(np.clip(value, 0.0, 100.0))
+            brake_var.set(value)
+            brake_entry_var.set(f"{value:.2f}")
+
+        def _sync_entry_from_scale(*_args):
+            brake_entry_var.set(f"{float(brake_var.get()):.2f}")
+
+        brake_var.trace_add("write", _sync_entry_from_scale)
+        brake_entry.bind("<Return>", _sync_scale_to_entry)
+        brake_entry.bind("<FocusOut>", _sync_scale_to_entry)
+
+        def _run_full_state_simulation():
+            try:
+                params_dict = self._get_params_from_gui()
+                if params_dict is None:
+                    return
+
+                config = self._create_fitter_config()
+                if config.motor_model_type != "dc":
+                    messagebox.showwarning(
+                        "Full-State Viewer",
+                        "Full-state viewer requires DC motor model.\nPlease switch Motor Model to 'DC Motor'.",
+                    )
+                    return
+
+                fitter = VehicleParamFitter(config)
+                param_array = self._params_dict_to_array(
+                    params_dict,
+                    use_init=True,
+                    motor_model_type=config.motor_model_type,
+                )
+
+                brake_pct = float(np.clip(float(brake_var.get()) / 100.0, 0.0, 1.0))
+                initial_speed = float(initial_speed_var.get())
+                grade_deg = float(grade_deg_var.get())
+                dt = max(float(dt_var.get()), 1e-3)
+                horizon_s = max(float(horizon_var.get()), 0.1)
+
+                status_var.set(f"Running full simulation ({horizon_s:.1f}s)...")
+                window.update_idletasks()
+
+                time_arr, signals = self._simulate_constant_brake_full_state(
+                    params=param_array,
+                    fitter=fitter,
+                    brake_pct=brake_pct,
+                    horizon_s=horizon_s,
+                    dt=dt,
+                    initial_speed=initial_speed,
+                    grade_deg=grade_deg,
+                )
+
+                self._plot_constant_action_full_state(
+                    fig=fig,
+                    time_arr=time_arr,
+                    signals=signals,
+                    command_name="brake",
+                    command_pct=brake_pct,
+                    horizon_s=horizon_s,
+                    dt=dt,
+                    initial_speed=initial_speed,
+                    grade_deg=grade_deg,
+                )
+                canvas.draw_idle()
+                status_var.set(f"Done ({horizon_s:.1f}s)")
+            except Exception as e:
+                LOGGER.exception("Failed full-state brake simulation view")
+                status_var.set("Error")
+                messagebox.showerror("Full-State Viewer Error", f"Failed to run simulation:\n{e}")
+
+        run_btn = ttk.Button(controls, text="Run Full Simulation", command=_run_full_state_simulation)
+        run_btn.grid(row=1, column=9, columnspan=2, sticky=tk.E, padx=4, pady=(8, 0))
+
+        _run_full_state_simulation()
+
+    def _simulate_constant_action_full_state(
         self,
         params: np.ndarray,
         fitter: VehicleParamFitter,
-        throttle_pct: float,
+        action: float,
         horizon_s: float,
         dt: float,
         initial_speed: float,
         grade_deg: float,
     ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
-        """Run detailed full-state simulation under constant throttle for the requested horizon."""
+        """Run detailed full-state simulation under a constant action for the requested horizon."""
         from simulation.dynamics import ExtendedPlant
 
         n_steps = max(int(horizon_s / max(dt, 1e-9)), 2)
@@ -1086,7 +1228,6 @@ class FittingGUI:
             "grade_force",
             "net_force",
             "held_by_brakes",
-            "creep_torque",
             "coupling_enabled",
         ]
         signals = {key: np.zeros(n_steps, dtype=np.float64) for key in state_keys}
@@ -1111,12 +1252,11 @@ class FittingGUI:
             signals["grade_force"][idx] = state.grade_force
             signals["net_force"][idx] = state.net_force
             signals["held_by_brakes"][idx] = 1.0 if state.held_by_brakes else 0.0
-            signals["creep_torque"][idx] = state.creep_torque
             signals["coupling_enabled"][idx] = 1.0 if state.coupling_enabled else 0.0
 
         _write_state(0, plant.state)
 
-        action = float(np.clip(throttle_pct, 0.0, 1.0))
+        action = float(np.clip(action, -1.0, 1.0))
         grade_rad = np.deg2rad(grade_deg)
         substeps = max(int(fitter.config.extended_plant_substeps), 1)
 
@@ -1132,22 +1272,70 @@ class FittingGUI:
         signals["rolling_power"] = signals["rolling_force"] * np.abs(signals["speed"])
         signals["grade_power"] = signals["grade_force"] * signals["speed"]
         signals["net_power"] = signals["net_force"] * signals["speed"]
-        signals["jerk"] = np.gradient(signals["acceleration"], dt)
+        i_limit_static = (
+            (ext_params.motor.T_max / max(ext_params.motor.K_t, 1e-9))
+            if ext_params.motor.T_max is not None
+            else (ext_params.motor.V_max / max(ext_params.motor.R, 1e-9))
+        )
+        signals["i_limit_static"] = np.full(n_steps, float(i_limit_static), dtype=np.float64)
 
         return time_arr, signals
 
-    def _plot_constant_throttle_full_state(
+    def _simulate_constant_throttle_full_state(
         self,
-        fig: Figure,
-        time_arr: np.ndarray,
-        signals: Dict[str, np.ndarray],
+        params: np.ndarray,
+        fitter: VehicleParamFitter,
         throttle_pct: float,
         horizon_s: float,
         dt: float,
         initial_speed: float,
         grade_deg: float,
+    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+        """Run detailed full-state simulation under constant throttle for the requested horizon."""
+        return self._simulate_constant_action_full_state(
+            params=params,
+            fitter=fitter,
+            action=float(np.clip(throttle_pct, 0.0, 1.0)),
+            horizon_s=horizon_s,
+            dt=dt,
+            initial_speed=initial_speed,
+            grade_deg=grade_deg,
+        )
+
+    def _simulate_constant_brake_full_state(
+        self,
+        params: np.ndarray,
+        fitter: VehicleParamFitter,
+        brake_pct: float,
+        horizon_s: float,
+        dt: float,
+        initial_speed: float,
+        grade_deg: float,
+    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+        """Run detailed full-state simulation under constant brake for the requested horizon."""
+        return self._simulate_constant_action_full_state(
+            params=params,
+            fitter=fitter,
+            action=-float(np.clip(brake_pct, 0.0, 1.0)),
+            horizon_s=horizon_s,
+            dt=dt,
+            initial_speed=initial_speed,
+            grade_deg=grade_deg,
+        )
+
+    def _plot_constant_action_full_state(
+        self,
+        fig: Figure,
+        time_arr: np.ndarray,
+        signals: Dict[str, np.ndarray],
+        command_name: str,
+        command_pct: float,
+        horizon_s: float,
+        dt: float,
+        initial_speed: float,
+        grade_deg: float,
     ) -> None:
-        """Render detailed full-state plots for constant-throttle simulation."""
+        """Render detailed full-state plots for constant-action simulation."""
         fig.clear()
         axes = fig.subplots(5, 2, sharex=True)
         ax = axes.flatten()
@@ -1166,14 +1354,15 @@ class FittingGUI:
         ax[1].grid(True, alpha=0.3)
 
         ax[2].plot(time_arr, signals["acceleration"], label="Acceleration", color="tab:green")
-        ax[2].plot(time_arr, signals["jerk"], label="Jerk", color="tab:olive", alpha=0.7)
-        ax[2].set_ylabel("a / jerk")
-        ax[2].set_title("Acceleration and Jerk")
+        ax[2].set_ylabel("Acceleration (m/s²)")
+        ax[2].set_title("Acceleration")
         ax[2].legend(fontsize=8)
         ax[2].grid(True, alpha=0.3)
 
         ax[3].plot(time_arr, signals["motor_current"], label="Motor Current", color="tab:green")
         ax[3].plot(time_arr, signals["i_limit"], label="Dynamic Current Limit", color="tab:red", linestyle="--")
+        if "i_limit_static" in signals:
+            ax[3].plot(time_arr, signals["i_limit_static"], label="Static Current Limit", color="tab:purple", linestyle=":")
         ax[3].set_ylabel("Current (A)")
         ax[3].set_title("Motor Current Limits")
         ax[3].legend(fontsize=8)
@@ -1193,11 +1382,10 @@ class FittingGUI:
         ax[5].legend(fontsize=8)
         ax[5].grid(True, alpha=0.3)
 
-        ax[6].plot(time_arr, signals["drive_torque"], label="Drive Torque", color="tab:cyan")
+        ax[6].plot(time_arr, signals["drive_torque"], label="Drive Torque (Wheel)", color="tab:cyan")
         ax[6].plot(time_arr, signals["brake_torque"], label="Brake Torque", color="tab:red")
-        ax[6].plot(time_arr, signals["creep_torque"], label="Creep Torque", color="tab:purple")
         ax[6].set_ylabel("Torque (Nm)")
-        ax[6].set_title("Torque Channels")
+        ax[6].set_title("Torque Channels (Wheel Side)")
         ax[6].legend(fontsize=8)
         ax[6].grid(True, alpha=0.3)
 
@@ -1231,6 +1419,7 @@ class FittingGUI:
         max_force = float(np.max(np.abs(signals["net_force"])))
         summary = (
             f"Summary\n"
+            f"{command_name.capitalize()} command: {command_pct * 100.0:.2f}%\n"
             f"Final speed: {final_speed:.3f} m/s\n"
             f"Max speed: {max_speed:.3f} m/s\n"
             f"Distance: {distance:.1f} m\n"
@@ -1248,10 +1437,35 @@ class FittingGUI:
 
         ax[8].set_xlabel("Time (s)")
         fig.suptitle(
-            f"Constant-Throttle Full-State Simulation ({horizon_s:.1f} s) | throttle={throttle_pct * 100.0:.2f}%",
+            f"Constant-{command_name.capitalize()} Full-State Simulation ({horizon_s:.1f} s) | "
+            f"{command_name}={command_pct * 100.0:.2f}%",
             fontsize=14,
         )
         fig.tight_layout(rect=(0, 0, 1, 0.96))
+
+    def _plot_constant_throttle_full_state(
+        self,
+        fig: Figure,
+        time_arr: np.ndarray,
+        signals: Dict[str, np.ndarray],
+        throttle_pct: float,
+        horizon_s: float,
+        dt: float,
+        initial_speed: float,
+        grade_deg: float,
+    ) -> None:
+        """Render detailed full-state plots for constant-throttle simulation."""
+        self._plot_constant_action_full_state(
+            fig=fig,
+            time_arr=time_arr,
+            signals=signals,
+            command_name="throttle",
+            command_pct=float(np.clip(throttle_pct, 0.0, 1.0)),
+            horizon_s=horizon_s,
+            dt=dt,
+            initial_speed=initial_speed,
+            grade_deg=grade_deg,
+        )
 
     def _compute_validation_rmse(self) -> None:
         """Open validation analysis window with detailed plots and statistics."""
@@ -2200,7 +2414,6 @@ class FittingGUI:
             config_kwargs["speed_loss_weight"] = float(self.speed_weight_var.get())
             config_kwargs["accel_loss_weight"] = float(self.accel_weight_var.get())
             config_kwargs["brake_loss_boost"] = float(self.brake_loss_boost_var.get())
-            config_kwargs["creep_loss_boost"] = float(self.creep_loss_boost_var.get())
             config_kwargs["full_stop_loss_cap_fraction"] = float(self.full_stop_loss_cap_var.get())
             config_kwargs["mask_negative_gt_speed"] = bool(self.mask_negative_speed_var.get())
             config_kwargs["apply_lpf_to_fitting_data"] = bool(self.apply_lpf_to_fitting_data_var.get())
@@ -2361,13 +2574,13 @@ class FittingGUI:
                     fitted.mass, fitted.drag_area, fitted.rolling_coeff,
                     fitted.motor_V_max, fitted.motor_R,
                     fitted.motor_K, fitted.motor_b, fitted.motor_J, fitted.motor_gamma_throttle, fitted.motor_throttle_tau,
+                    fitted.motor_min_current_A,
                     fitted.motor_T_max if fitted.motor_T_max is not None else (fitted.motor_K * (fitted.motor_V_max / max(fitted.motor_R, 1e-4))),
                     fitted.motor_P_max if fitted.motor_P_max is not None else 0.0,
                     fitted.gear_ratio, fitted.eta_gb,
                     fitted.brake_T_max, fitted.brake_tau, fitted.brake_p,
                     fitted.brake_kappa, fitted.mu,
                     fitted.wheel_radius, fitted.wheel_inertia,
-                    fitted.creep_a_max, fitted.creep_v_cutoff, fitted.creep_v_hold,
                 ])
 
             # Use the model type from config (what was actually fitted)
@@ -2459,9 +2672,9 @@ class FittingGUI:
                         ha="center", va="center", transform=ax4.transAxes)
 
             if config.motor_model_type == "dc":
-                ax5.plot(state_time, throttle_state["drive_torque"], "c-", label="Drive Torque (Throttle=1.0)")
+                ax5.plot(state_time, throttle_state["drive_torque"], "c-", label="Drive Torque @ Wheel (Throttle=1.0)")
                 ax5.plot(brake_state_time, brake_state["brake_torque"], "r-", label="Brake Torque (Brake=1.0)")
-                ax5.set_title("Full-State Torques")
+                ax5.set_title("Full-State Torques (Wheel Side)")
                 ax5.set_xlabel("Time (s)")
                 ax5.set_ylabel("Torque (Nm)")
                 ax5.legend(fontsize=8, loc="upper right")
@@ -2842,9 +3055,8 @@ class FittingGUI:
         """Save current GUI settings to a JSON file."""
         try:
             settings = {
-                # Dataset and naming
+                # Dataset
                 "dataset": self.dataset_var.get(),
-                "name": self.name_var.get(),
                 
                 # Motor model and barrier
                 "motor_model": self.motor_model_var.get(),
@@ -2877,7 +3089,6 @@ class FittingGUI:
                 "speed_weight": self.speed_weight_var.get(),
                 "accel_weight": self.accel_weight_var.get(),
                 "brake_loss_boost": self.brake_loss_boost_var.get(),
-                "creep_loss_boost": self.creep_loss_boost_var.get(),
                 "full_stop_loss_cap": self.full_stop_loss_cap_var.get(),
                 "mask_negative_speed": self.mask_negative_speed_var.get(),
                 
@@ -2929,6 +3140,9 @@ class FittingGUI:
 
     def _load_settings(self):
         """Load GUI settings from JSON file if it exists."""
+        # Fitting name should always use current wall-clock timestamp, not persisted defaults.
+        self.name_var.set(datetime.now().strftime("fit_%Y%m%d_%H%M%S"))
+
         if not self.settings_file.exists():
             return  # No saved settings, use defaults
         
@@ -2936,11 +3150,9 @@ class FittingGUI:
             with open(self.settings_file, 'r') as f:
                 settings = json.load(f)
             
-            # Restore dataset and naming
+            # Restore dataset
             if "dataset" in settings:
                 self.dataset_var.set(settings["dataset"])
-            if "name" in settings:
-                self.name_var.set(settings["name"])
             
             # Restore motor model and barrier
             if "motor_model" in settings:
@@ -3003,8 +3215,6 @@ class FittingGUI:
                 self.accel_weight_var.set(settings["accel_weight"])
             if "brake_loss_boost" in settings:
                 self.brake_loss_boost_var.set(settings["brake_loss_boost"])
-            if "creep_loss_boost" in settings:
-                self.creep_loss_boost_var.set(settings["creep_loss_boost"])
             if "full_stop_loss_cap" in settings:
                 self.full_stop_loss_cap_var.set(settings["full_stop_loss_cap"])
             if "mask_negative_speed" in settings:

@@ -30,7 +30,6 @@ from simulation.dynamics import (
     BrakeParams,
     BodyParams,
     WheelParams,
-    CreepParams,
 )
 
 try:
@@ -127,6 +126,7 @@ class FittedVehicleParams:
     motor_J: float = 1e-3  # kg·m² - rotor inertia
     motor_gamma_throttle: float = 1.0  # throttle nonlinearity exponent
     motor_throttle_tau: float = 0.1  # s - throttle time constant
+    motor_min_current_A: float = 0.0  # A - minimum commanded current at zero throttle
     motor_T_max: float | None = None  # Nm - max motor torque
     motor_P_max: float | None = None  # W - max motor power
     
@@ -145,11 +145,6 @@ class FittedVehicleParams:
     wheel_radius: float = 0.346  # m - wheel radius
     wheel_inertia: float = 1.5  # kg·m² - wheel + rotating assembly
 
-    # === CREEP PARAMETERS ===
-    creep_a_max: float = 0.5  # m/s² - max creep acceleration
-    creep_v_cutoff: float = 1.5  # m/s - speed where creep fades out
-    creep_v_hold: float = 0.08  # m/s - standstill threshold
-    
     # === FITTING METADATA ===
     fit_loss: float = 0.0  # Final loss value (velocity MSE)
     num_samples: int = 0  # Number of data points used
@@ -178,6 +173,7 @@ class FittedVehicleParams:
             "motor_J": 1e-3,
             "motor_gamma_throttle": 1.0,
             "motor_throttle_tau": 0.1,
+            "motor_min_current_A": 0.0,
             "motor_T_max": None,
             "motor_P_max": None,
             "gear_ratio": 10.0,
@@ -189,10 +185,12 @@ class FittedVehicleParams:
             "mu": 0.9,
             "wheel_radius": 0.346,
             "wheel_inertia": 1.5,
-            "creep_a_max": 0.5,
-            "creep_v_cutoff": 1.5,
-            "creep_v_hold": 0.08,
         }
+
+        # Drop legacy creep fields if present.
+        d.pop("creep_a_max", None)
+        d.pop("creep_v_cutoff", None)
+        d.pop("creep_v_hold", None)
 
         # Handle motor_I_max -> motor_T_max conversion (before filtering)
         if "motor_I_max" in d and "motor_T_max" not in d and "motor_K" in d:
@@ -237,6 +235,7 @@ class FittedVehicleParams:
                 "J": self.motor_J,
                 "gamma_throttle": self.motor_gamma_throttle,
                 "throttle_tau": self.motor_throttle_tau,
+                "min_current_A": self.motor_min_current_A,
                 "T_max": self.motor_T_max,
                 "P_max": self.motor_P_max,
             },
@@ -252,11 +251,6 @@ class FittedVehicleParams:
             "wheel": {
                 "radius": self.wheel_radius,
                 "inertia": self.wheel_inertia,
-            },
-            "creep": {
-                "a_max": self.creep_a_max,
-                "v_cutoff": self.creep_v_cutoff,
-                "v_hold": self.creep_v_hold,
             },
         }
 
@@ -282,6 +276,7 @@ class FitterConfig:
     motor_J_init: float = 1e-3  # kg·m² - rotor inertia
     motor_gamma_throttle_init: float = 1.0  # throttle nonlinearity exponent
     motor_throttle_tau_init: float = 0.1  # s - throttle time constant
+    motor_min_current_A_init: float = 0.0  # A - minimum commanded current at zero throttle
     motor_T_max_init: float | None = None  # Nm - max motor torque (optional)
     motor_P_max_init: float | None = None  # W - max motor power (optional)
     gear_ratio_init: float = 10.0  # gear ratio
@@ -294,11 +289,6 @@ class FitterConfig:
     wheel_radius_init: float = 0.346  # m
     wheel_inertia_init: float = 1.5  # kg·m²
 
-    # === CREEP PARAMETERS ===
-    creep_a_max_init: float = 0.5  # m/s²
-    creep_v_cutoff_init: float = 1.5  # m/s
-    creep_v_hold_init: float = 0.08  # m/s
-    
     # === PARAMETER BOUNDS (all fitted by default) ===
     mass_bounds: Tuple[float, float] = (1800.0, 2300.0)  # kg
     drag_area_bounds: Tuple[float, float] = (0.4, 1.2)   # CdA (m²)
@@ -310,6 +300,7 @@ class FitterConfig:
     motor_J_bounds: Tuple[float, float] = (1e-2, 1e-1)  # kg·m²
     motor_gamma_throttle_bounds: Tuple[float, float] = (0.5, 2.0)  # throttle nonlinearity exponent
     motor_throttle_tau_bounds: Tuple[float, float] = (0.02, 0.5)  # s - throttle time constant
+    motor_min_current_A_bounds: Tuple[float, float] = (0.0, 80.0)  # A
     motor_T_max_bounds: Tuple[float, float] = (0.0, 1000.0)  # Nm - optional torque limit
     motor_P_max_bounds: Tuple[float, float] = (0.0, 250000.0)  # W - optional power limit
     gear_ratio_bounds: Tuple[float, float] = (4.3, 11.0)  # N
@@ -322,22 +313,16 @@ class FitterConfig:
     wheel_radius_bounds: Tuple[float, float] = (0.315, 0.34)  # m
     wheel_inertia_bounds: Tuple[float, float] = (1.0, 2.0)  # kg·m²
 
-    creep_a_max_bounds: Tuple[float, float] = (0.0, 1.5)  # m/s²
-    creep_v_cutoff_bounds: Tuple[float, float] = (0.5, 3.0)  # m/s
-    creep_v_hold_bounds: Tuple[float, float] = (0.0, 0.5)  # m/s
-    
     # === LOSS SETTINGS ===
     speed_loss_weight: float = 1.0  # weight for velocity MSE
     accel_loss_weight: float = 0.0  # weight for instantaneous acceleration MSE
     brake_loss_boost: float = 0.0  # extra weight for samples with active brake
-    creep_loss_boost: float = 0.0  # extra weight for samples in creep intervals
     mask_negative_gt_speed: bool = False  # ignore loss where GT speed is negative
     full_stop_loss_cap_fraction: float = 0.0  # cap full-stop segment loss as fraction of total (0=off)
     
     # === PLANT PARITY SETTINGS ===
     use_extended_plant: bool = True  # use ExtendedPlant dynamics for simulation
     extended_plant_substeps: int = 1  # substeps per dt (match env config)
-    extended_plant_disable_creep: bool = False  # disable creep torque for parity checks
     extended_plant_zero_brake_lag: bool = False  # force brake tau ~0 for parity checks
     
     # === DATA PREPROCESSING ===
@@ -506,7 +491,7 @@ class VehicleParamFitter:
                 "gear_ratio", "eta_gb",
                 "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
                 "wheel_radius", "wheel_inertia",
-                "creep_a_max", "creep_v_cutoff", "creep_v_hold",
+                "motor_min_current_A",
             ]
         else:  # DC model
             return [
@@ -516,7 +501,7 @@ class VehicleParamFitter:
                 "gear_ratio", "eta_gb",
                 "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
                 "wheel_radius", "wheel_inertia",
-                "creep_a_max", "creep_v_cutoff", "creep_v_hold",
+                "motor_min_current_A",
             ]
     
     def __init__(self, config: Optional[FitterConfig] = None):
@@ -1665,13 +1650,11 @@ class VehicleParamFitter:
         
         Supports both DC motor model and polynomial motor map.
         
-        NOTE: Creep torque is NOT included in this fitting model. Creep parameters
-        are fixed (not fitted) and will be applied during runtime using the fitted
-        vehicle parameters. The creep torque is dynamically computed from mass, gear ratio,
-        and other fitted parameters, ensuring it remains consistent with the fitted model.
+        NOTE: This simplified acceleration model uses the same zero-throttle current
+        floor concept as the ExtendedPlant via `motor_min_current_A`.
         """
         if self.config.motor_model_type == "polynomial":
-            # Polynomial model: 28 parameters
+            # Polynomial model: 26 parameters
             (mass, drag_area, rolling_coeff,
              V_max, gamma_throttle, throttle_tau,
              poly_c_00, poly_c_10, poly_c_01, poly_c_20, poly_c_11, poly_c_02,
@@ -1704,13 +1687,15 @@ class VehicleParamFitter:
             # For polynomial model, use default motor inertia (not fitted)
             J = 1e-3  # Default motor rotor inertia (kg·m²)
         else:
-            # DC motor model: 24 parameters
+            # DC motor model: 22 parameters
             (mass, drag_area, rolling_coeff,
              V_max, R, K, b, J, gamma_throttle, throttle_tau, T_max, P_max,
              gear_ratio, eta,
              brake_T_max, brake_tau, brake_p, brake_kappa, mu,
              r_w, wheel_inertia,
-             *_) = params
+             *tail) = params
+
+            motor_min_current_A = float(tail[0]) if len(tail) > 0 else self.config.motor_min_current_A_init
             
             # Motor speed from wheel speed
             omega_m = gear_ratio * speed / max(r_w, 1e-3)
@@ -1719,7 +1704,9 @@ class VehicleParamFitter:
             I_max = (T_max / max(K, 1e-6)) if T_max > 0.0 else (V_max / max(R, 1e-4))
             back_emf = K * omega_m
             throttle_frac = max(throttle, 0.0) / 100.0
-            target_current = (throttle_frac ** gamma_throttle) * I_max
+            i_floor = max(motor_min_current_A, 0.0)
+            i_span = max(I_max - i_floor, 0.0)
+            target_current = i_floor + (throttle_frac ** gamma_throttle) * i_span
             v_required = target_current * R + back_emf
             v_applied = min(v_required, V_max)
             motor_current = max((v_applied - back_emf) / max(R, 1e-4), 0.0)
@@ -1827,62 +1814,144 @@ class VehicleParamFitter:
 
     def _build_extended_plant_params(self, params: np.ndarray) -> ExtendedPlantParams:
         """Create ExtendedPlantParams from fitted parameter array (DC model)."""
-        if len(params) >= 24:
-            (
-                mass, drag_area, rolling_coeff,
-                V_max, R, K, b, J, gamma_throttle, throttle_tau, T_max, P_max,
-                gear_ratio, eta,
-                brake_T_max, brake_tau, brake_p, brake_kappa, mu,
-                r_w, wheel_inertia,
-                creep_a_max, creep_v_cutoff, creep_v_hold,
-            ) = params[:24]
-        elif len(params) == 23:
-            (
-                mass, drag_area, rolling_coeff,
-                V_max, R, K, b, J, gamma_throttle, T_max, P_max,
-                gear_ratio, eta,
-                brake_T_max, brake_tau, brake_p, brake_kappa, mu,
-                r_w, wheel_inertia,
-                creep_a_max, creep_v_cutoff, creep_v_hold,
-            ) = params
-            throttle_tau = self.config.motor_throttle_tau_init
-        elif len(params) == 22:
-            (
-                mass, drag_area, rolling_coeff,
-                V_max, R, K, b, J, T_max, P_max,
-                gear_ratio, eta,
-                brake_T_max, brake_tau, brake_p, brake_kappa, mu,
-                r_w, wheel_inertia,
-                creep_a_max, creep_v_cutoff, creep_v_hold,
-            ) = params
-            gamma_throttle = self.config.motor_gamma_throttle_init
-            throttle_tau = self.config.motor_throttle_tau_init
-        elif len(params) == 21:
-            (
-                mass, drag_area, rolling_coeff,
-                V_max, R, K, b, J,
-                gear_ratio, eta,
-                brake_T_max, brake_tau, brake_p, brake_kappa, mu,
-                r_w, wheel_inertia,
-                creep_a_max, creep_v_cutoff, creep_v_hold,
-            ) = params
-            T_max = self.config.motor_T_max_init or (K * (V_max / max(R, 1e-4)))
-            P_max = self.config.motor_P_max_init or 0.0
-            gamma_throttle = self.config.motor_gamma_throttle_init
-            throttle_tau = self.config.motor_throttle_tau_init
+        cfg = self.config
+        values = np.asarray(params, dtype=np.float64).flatten()
+
+        names_new_22 = [
+            "mass", "drag_area", "rolling_coeff",
+            "V_max", "R", "K", "b", "J", "gamma_throttle", "throttle_tau", "T_max", "P_max",
+            "gear_ratio", "eta",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "r_w", "wheel_inertia",
+            "motor_min_current_A",
+        ]
+        names_old_24 = [
+            "mass", "drag_area", "rolling_coeff",
+            "V_max", "R", "K", "b", "J", "gamma_throttle", "throttle_tau", "T_max", "P_max",
+            "gear_ratio", "eta",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "r_w", "wheel_inertia",
+            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
+        ]
+        names_old_23 = [
+            "mass", "drag_area", "rolling_coeff",
+            "V_max", "R", "K", "b", "J", "gamma_throttle", "T_max", "P_max",
+            "gear_ratio", "eta",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "r_w", "wheel_inertia",
+            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
+        ]
+        names_old_22 = [
+            "mass", "drag_area", "rolling_coeff",
+            "V_max", "R", "K", "b", "J", "T_max", "P_max",
+            "gear_ratio", "eta",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "r_w", "wheel_inertia",
+            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
+        ]
+        names_old_21 = [
+            "mass", "drag_area", "rolling_coeff",
+            "V_max", "R", "K", "b", "J",
+            "gear_ratio", "eta",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "r_w", "wheel_inertia",
+            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
+        ]
+        names_old_19 = [
+            "mass", "drag_area", "rolling_coeff",
+            "V_max", "R", "K", "b", "J", "T_max", "P_max",
+            "gear_ratio", "eta",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "r_w", "wheel_inertia",
+        ]
+
+        if len(values) >= 24:
+            active_names = names_old_24
+            values = values[:24]
+        elif len(values) == 23:
+            active_names = names_old_23
+        elif len(values) == 22:
+            gr_lo, gr_hi = cfg.gear_ratio_bounds
+            br_lo, br_hi = cfg.brake_T_max_bounds
+            t_lo, t_hi = cfg.motor_T_max_bounds
+            p_lo, p_hi = cfg.motor_P_max_bounds
+
+            new_signature = (gr_lo <= values[12] <= gr_hi) and (br_lo <= values[14] <= br_hi)
+            old_signature = (gr_lo <= values[10] <= gr_hi) and (br_lo <= values[12] <= br_hi)
+
+            if new_signature and not old_signature:
+                active_names = names_new_22
+            elif old_signature and not new_signature:
+                active_names = names_old_22
+            else:
+                gamma_lo, gamma_hi = cfg.motor_gamma_throttle_bounds
+                tau_lo, tau_hi = cfg.motor_throttle_tau_bounds
+                looks_new = (
+                    gamma_lo <= values[8] <= gamma_hi
+                    and tau_lo <= values[9] <= tau_hi
+                    and t_lo <= values[10] <= t_hi
+                    and p_lo <= values[11] <= p_hi
+                )
+                active_names = names_new_22 if looks_new else names_old_22
+        elif len(values) == 21:
+            active_names = names_old_21
+        elif len(values) == 19:
+            active_names = names_old_19
         else:
-            (
-                mass, drag_area, rolling_coeff,
-                V_max, R, K, b, J, T_max, P_max,
-                gear_ratio, eta,
-                brake_T_max, brake_tau, brake_p, brake_kappa, mu,
-                r_w, wheel_inertia,
-            ) = params
-            creep_a_max = self.config.creep_a_max_init
-            creep_v_cutoff = self.config.creep_v_cutoff_init
-            creep_v_hold = self.config.creep_v_hold_init
-            gamma_throttle = self.config.motor_gamma_throttle_init
-            throttle_tau = self.config.motor_throttle_tau_init
+            raise ValueError(f"Unsupported DC parameter length for ExtendedPlant build: {len(values)}")
+
+        param_map = {
+            "mass": cfg.mass_init,
+            "drag_area": cfg.drag_area_init,
+            "rolling_coeff": cfg.rolling_coeff_init,
+            "V_max": cfg.motor_V_max_init,
+            "R": cfg.motor_R_init,
+            "K": cfg.motor_K_init,
+            "b": cfg.motor_b_init,
+            "J": cfg.motor_J_init,
+            "gamma_throttle": cfg.motor_gamma_throttle_init,
+            "throttle_tau": cfg.motor_throttle_tau_init,
+            "T_max": cfg.motor_T_max_init if cfg.motor_T_max_init is not None else (cfg.motor_K_init * (cfg.motor_V_max_init / max(cfg.motor_R_init, 1e-4))),
+            "P_max": cfg.motor_P_max_init if cfg.motor_P_max_init is not None else 0.0,
+            "gear_ratio": cfg.gear_ratio_init,
+            "eta": cfg.eta_gb_init,
+            "brake_T_max": cfg.brake_T_max_init,
+            "brake_tau": cfg.brake_tau_init,
+            "brake_p": cfg.brake_p_init,
+            "brake_kappa": cfg.brake_kappa_init,
+            "mu": cfg.mu_init,
+            "r_w": cfg.wheel_radius_init,
+            "wheel_inertia": cfg.wheel_inertia_init,
+            "motor_min_current_A": cfg.motor_min_current_A_init,
+        }
+
+        for name, value in zip(active_names, values):
+            if name.startswith("creep_"):
+                continue
+            param_map[name] = float(value)
+
+        mass = param_map["mass"]
+        drag_area = param_map["drag_area"]
+        rolling_coeff = param_map["rolling_coeff"]
+        V_max = param_map["V_max"]
+        R = param_map["R"]
+        K = param_map["K"]
+        b = param_map["b"]
+        J = param_map["J"]
+        gamma_throttle = param_map["gamma_throttle"]
+        throttle_tau = param_map["throttle_tau"]
+        T_max = param_map["T_max"]
+        P_max = param_map["P_max"]
+        gear_ratio = param_map["gear_ratio"]
+        eta = param_map["eta"]
+        brake_T_max = param_map["brake_T_max"]
+        brake_tau = param_map["brake_tau"]
+        brake_p = param_map["brake_p"]
+        brake_kappa = param_map["brake_kappa"]
+        mu = param_map["mu"]
+        r_w = param_map["r_w"]
+        wheel_inertia = param_map["wheel_inertia"]
+        motor_min_current_A = param_map["motor_min_current_A"]
 
         t_max_val = T_max if T_max > 0.0 else None
         p_max_val = P_max if P_max > 0.0 else None
@@ -1898,6 +1967,7 @@ class VehicleParamFitter:
             P_max=p_max_val,
             gamma_throttle=gamma_throttle,
             throttle_tau=throttle_tau,
+            min_current_A=max(motor_min_current_A, 0.0),
             gear_ratio=gear_ratio,
             eta_gb=eta,
         )
@@ -1925,16 +1995,7 @@ class VehicleParamFitter:
             v_eps=0.1,
         )
 
-        if self.config.extended_plant_disable_creep:
-            creep = CreepParams(a_max=0.0, v_cutoff=1.0, v_hold=0.0)
-        else:
-            creep = CreepParams(
-                a_max=creep_a_max,
-                v_cutoff=creep_v_cutoff,
-                v_hold=creep_v_hold,
-            )
-
-        return ExtendedPlantParams(motor=motor, brake=brake, body=body, wheel=wheel, creep=creep)
+        return ExtendedPlantParams(motor=motor, brake=brake, body=body, wheel=wheel)
 
     def _simulate_segment_extended(
         self,
@@ -2315,20 +2376,6 @@ class VehicleParamFitter:
                 weight = 1.0 + cfg.brake_loss_boost * brake_active
                 weighted_errors = weighted_errors * weight
 
-            if cfg.creep_loss_boost > 0.0:
-                creep_cutoff = float(
-                    params[self.PARAM_NAMES.index("creep_v_cutoff")]
-                    if "creep_v_cutoff" in self.PARAM_NAMES
-                    else cfg.creep_v_cutoff_init
-                )
-                creep_active = (
-                    (speeds_gt <= creep_cutoff)
-                    & (throttles_gt <= cfg.actuator_deadband_pct)
-                    & (brakes_gt <= cfg.brake_deadband_pct)
-                ).float()
-                weight = 1.0 + cfg.creep_loss_boost * creep_active
-                weighted_errors = weighted_errors * weight
-            
             # Sum over all segments and timesteps
             total_loss = torch.sum(weighted_errors).item()
             total_samples = torch.sum(valid_mask).item()
@@ -2351,11 +2398,6 @@ class VehicleParamFitter:
             total_loss = 0.0
             total_samples = 0
             full_stop_loss = 0.0
-            creep_cutoff = None
-            if cfg.creep_loss_boost > 0.0 and "creep_v_cutoff" in self.PARAM_NAMES:
-                creep_cutoff = float(params[self.PARAM_NAMES.index("creep_v_cutoff")])
-            elif cfg.creep_loss_boost > 0.0:
-                creep_cutoff = float(cfg.creep_v_cutoff_init)
             
             debug_progress = False
             debug_label = ""
@@ -2385,14 +2427,6 @@ class VehicleParamFitter:
                 if cfg.brake_loss_boost > 0.0:
                     brake_active = segment.brake > cfg.brake_deadband_pct
                     weight = 1.0 + cfg.brake_loss_boost * brake_active
-                    weighted_se = weighted_se * weight
-                if cfg.creep_loss_boost > 0.0:
-                    creep_active = (
-                        (segment.speed <= creep_cutoff)
-                        & (segment.throttle <= cfg.actuator_deadband_pct)
-                        & (segment.brake <= cfg.brake_deadband_pct)
-                    )
-                    weight = 1.0 + cfg.creep_loss_boost * creep_active
                     weighted_se = weighted_se * weight
                 total_loss += np.sum(weighted_se)
                 if cfg.full_stop_loss_cap_fraction > 0.0:
@@ -2446,9 +2480,7 @@ class VehicleParamFitter:
         if self.config.debug_batch_progress:
             debug_params = [
                 "motor_gamma_throttle",
-                "creep_a_max",
-                "creep_v_cutoff",
-                "creep_v_hold",
+                "motor_min_current_A",
             ]
             name_to_idx = {name: idx for idx, name in enumerate(self.PARAM_NAMES)}
             for name in debug_params:
@@ -2790,7 +2822,7 @@ class VehicleParamFitter:
         
         # Initial parameters and bounds (variable count based on motor model)
         if cfg.motor_model_type == "polynomial":
-            # Polynomial model: 28 parameters
+            # Polynomial model: 26 parameters
             x0 = np.array([
                 cfg.mass_init,
                 cfg.drag_area_init,
@@ -2817,9 +2849,7 @@ class VehicleParamFitter:
                 cfg.mu_init,
                 cfg.wheel_radius_init,
                 cfg.wheel_inertia_init,
-                cfg.creep_a_max_init,
-                cfg.creep_v_cutoff_init,
-                cfg.creep_v_hold_init,
+                cfg.motor_min_current_A_init,
             ])
             
             bounds = [
@@ -2848,12 +2878,10 @@ class VehicleParamFitter:
                 cfg.mu_bounds,
                 cfg.wheel_radius_bounds,
                 cfg.wheel_inertia_bounds,
-                cfg.creep_a_max_bounds,
-                cfg.creep_v_cutoff_bounds,
-                cfg.creep_v_hold_bounds,
+                cfg.motor_min_current_A_bounds,
             ]
         else:
-            # DC motor model: 24 parameters
+            # DC motor model: 22 parameters
             x0 = np.array([
                 cfg.mass_init,
                 cfg.drag_area_init,
@@ -2876,9 +2904,7 @@ class VehicleParamFitter:
                 cfg.mu_init,
                 cfg.wheel_radius_init,
                 cfg.wheel_inertia_init,
-                cfg.creep_a_max_init,
-                cfg.creep_v_cutoff_init,
-                cfg.creep_v_hold_init,
+                cfg.motor_min_current_A_init,
             ])
             
             bounds = [
@@ -2903,9 +2929,7 @@ class VehicleParamFitter:
                 cfg.mu_bounds,
                 cfg.wheel_radius_bounds,
                 cfg.wheel_inertia_bounds,
-                cfg.creep_a_max_bounds,
-                cfg.creep_v_cutoff_bounds,
-                cfg.creep_v_hold_bounds,
+                cfg.motor_min_current_A_bounds,
             ]
         
         # Store bounds for barrier function computation
@@ -3368,29 +3392,30 @@ class VehicleParamFitter:
             fitted = PolynomialFittedParams(param_dict)
         else:
             # DC motor model: use existing FittedVehicleParams
+            by_name = {name: float(val) for name, val in zip(self.PARAM_NAMES, best_params)}
             fitted = FittedVehicleParams(
-                mass=best_params[0],
-                drag_area=best_params[1],
-                rolling_coeff=best_params[2],
-                motor_V_max=best_params[3],
-                motor_R=best_params[4],
-                motor_K=best_params[5],
-                motor_b=best_params[6],
-                motor_J=best_params[7],
-                motor_T_max=best_params[8] if best_params[8] > 0.0 else None,
-                motor_P_max=best_params[9] if best_params[9] > 0.0 else None,
-                gear_ratio=best_params[10],
-                eta_gb=best_params[11],
-                brake_T_max=best_params[12],
-                brake_tau=best_params[13],
-                brake_p=best_params[14],
-                brake_kappa=best_params[15],
-                mu=best_params[16],
-                wheel_radius=best_params[17],
-                wheel_inertia=best_params[18],
-                creep_a_max=best_params[19],
-                creep_v_cutoff=best_params[20],
-                creep_v_hold=best_params[21],
+                mass=by_name["mass"],
+                drag_area=by_name["drag_area"],
+                rolling_coeff=by_name["rolling_coeff"],
+                motor_V_max=by_name["motor_V_max"],
+                motor_R=by_name["motor_R"],
+                motor_K=by_name["motor_K"],
+                motor_b=by_name["motor_b"],
+                motor_J=by_name["motor_J"],
+                motor_gamma_throttle=by_name.get("motor_gamma_throttle", cfg.motor_gamma_throttle_init),
+                motor_throttle_tau=by_name.get("motor_throttle_tau", cfg.motor_throttle_tau_init),
+                motor_min_current_A=by_name.get("motor_min_current_A", cfg.motor_min_current_A_init),
+                motor_T_max=(by_name.get("motor_T_max", 0.0) if by_name.get("motor_T_max", 0.0) > 0.0 else None),
+                motor_P_max=(by_name.get("motor_P_max", 0.0) if by_name.get("motor_P_max", 0.0) > 0.0 else None),
+                gear_ratio=by_name["gear_ratio"],
+                eta_gb=by_name["eta_gb"],
+                brake_T_max=by_name["brake_T_max"],
+                brake_tau=by_name["brake_tau"],
+                brake_p=by_name["brake_p"],
+                brake_kappa=by_name["brake_kappa"],
+                mu=by_name["mu"],
+                wheel_radius=by_name["wheel_radius"],
+                wheel_inertia=by_name["wheel_inertia"],
                 fit_loss=val_loss,
                 num_samples=total_samples,
                 r_squared=r_squared,
@@ -3428,120 +3453,164 @@ class VehicleParamFitter:
         cfg = self.config
         params = np.asarray(params, dtype=np.float64).flatten()
 
-        def _ensure_throttle_tau(p: np.ndarray) -> np.ndarray:
-            if p.size > 9:
-                cand = p[9]
-                lo, hi = cfg.motor_throttle_tau_bounds
-                if np.isfinite(cand) and lo <= cand <= hi:
-                    return p
-            return np.insert(p, 9, cfg.motor_throttle_tau_init)
+        names_new_22 = [
+            "mass", "drag_area", "rolling_coeff",
+            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_gamma_throttle", "motor_throttle_tau",
+            "motor_T_max", "motor_P_max",
+            "gear_ratio", "eta_gb",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "wheel_radius", "wheel_inertia",
+            "motor_min_current_A",
+        ]
+        names_old_24 = [
+            "mass", "drag_area", "rolling_coeff",
+            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_gamma_throttle", "motor_throttle_tau",
+            "motor_T_max", "motor_P_max",
+            "gear_ratio", "eta_gb",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "wheel_radius", "wheel_inertia",
+            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
+        ]
+        names_old_23 = [
+            "mass", "drag_area", "rolling_coeff",
+            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_gamma_throttle",
+            "motor_T_max", "motor_P_max",
+            "gear_ratio", "eta_gb",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "wheel_radius", "wheel_inertia",
+            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
+        ]
+        names_old_22 = [
+            "mass", "drag_area", "rolling_coeff",
+            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J",
+            "motor_T_max", "motor_P_max",
+            "gear_ratio", "eta_gb",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "wheel_radius", "wheel_inertia",
+            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
+        ]
+        names_old_21 = [
+            "mass", "drag_area", "rolling_coeff",
+            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J",
+            "gear_ratio", "eta_gb",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "wheel_radius", "wheel_inertia",
+            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
+        ]
+        names_old_19 = [
+            "mass", "drag_area", "rolling_coeff",
+            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_T_max", "motor_P_max",
+            "gear_ratio", "eta_gb",
+            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "wheel_radius", "wheel_inertia",
+        ]
 
-        if params.size == 24:
-            params = np.concatenate([params[:5], params[6:]])
-            params = np.insert(params, 8, cfg.motor_gamma_throttle_init)
-            return _ensure_throttle_tau(params)
+        defaults = {
+            "mass": cfg.mass_init,
+            "drag_area": cfg.drag_area_init,
+            "rolling_coeff": cfg.rolling_coeff_init,
+            "motor_V_max": cfg.motor_V_max_init,
+            "motor_R": cfg.motor_R_init,
+            "motor_K": cfg.motor_K_init,
+            "motor_b": cfg.motor_b_init,
+            "motor_J": cfg.motor_J_init,
+            "motor_gamma_throttle": cfg.motor_gamma_throttle_init,
+            "motor_throttle_tau": cfg.motor_throttle_tau_init,
+            "motor_T_max": cfg.motor_T_max_init if cfg.motor_T_max_init is not None else (cfg.motor_K_init * (cfg.motor_V_max_init / max(cfg.motor_R_init, 1e-4))),
+            "motor_P_max": cfg.motor_P_max_init if cfg.motor_P_max_init is not None else cfg.motor_P_max_bounds[1],
+            "gear_ratio": cfg.gear_ratio_init,
+            "eta_gb": cfg.eta_gb_init,
+            "brake_T_max": cfg.brake_T_max_init,
+            "brake_tau": cfg.brake_tau_init,
+            "brake_p": cfg.brake_p_init,
+            "brake_kappa": cfg.brake_kappa_init,
+            "mu": cfg.mu_init,
+            "wheel_radius": cfg.wheel_radius_init,
+            "wheel_inertia": cfg.wheel_inertia_init,
+            "motor_min_current_A": cfg.motor_min_current_A_init,
+        }
 
-        if params.size == 23:
-            if 0.0 <= params[5] < 0.05:
-                params = np.concatenate([params[:5], params[6:]])
-                params = np.insert(params, 8, cfg.motor_gamma_throttle_init)
-                return _ensure_throttle_tau(params)
-            return _ensure_throttle_tau(params)
+        if params.size >= 24:
+            active_names = names_old_24
+            active_vals = params[:24]
+        elif params.size == 23:
+            active_names = names_old_23
+            active_vals = params
+        elif params.size == 22:
+            gr_lo, gr_hi = cfg.gear_ratio_bounds
+            br_lo, br_hi = cfg.brake_T_max_bounds
+            t_lo, t_hi = cfg.motor_T_max_bounds
+            p_lo, p_hi = cfg.motor_P_max_bounds
 
-        if params.size >= 22:
-            params = np.insert(params, 8, cfg.motor_gamma_throttle_init)
-            return _ensure_throttle_tau(params)
+            new_signature = (gr_lo <= params[12] <= gr_hi) and (br_lo <= params[14] <= br_hi)
+            old_signature = (gr_lo <= params[10] <= gr_hi) and (br_lo <= params[12] <= br_hi)
 
-        if params.size == 20:
-            params_wo_L = np.concatenate([params[:5], params[6:]])
-            params_wo_L = np.insert(params_wo_L, 8, cfg.motor_gamma_throttle_init)
-            return _ensure_throttle_tau(np.concatenate([
-                params_wo_L,
-                np.array([
-                    cfg.creep_a_max_init,
-                    cfg.creep_v_cutoff_init,
-                    cfg.creep_v_hold_init,
-                ], dtype=np.float64),
-            ]))
-
-        if params.size == 21:
-            params_wo_L = np.concatenate([params[:5], params[6:]])
-            params_wo_L = np.insert(params_wo_L, 8, cfg.motor_gamma_throttle_init)
-            return _ensure_throttle_tau(np.concatenate([
-                params_wo_L[:9],
-                np.array([
-                    cfg.motor_T_max_init if cfg.motor_T_max_init is not None else (cfg.motor_K_init * (cfg.motor_V_max_init / max(cfg.motor_R_init, 1e-4))),
-                    cfg.motor_P_max_init if cfg.motor_P_max_init is not None else cfg.motor_P_max_bounds[1],
-                ], dtype=np.float64),
-                params_wo_L[9:],
-            ]))
-
-        if params.size == 19:
-            return _ensure_throttle_tau(np.concatenate([
-                params,
-                np.array([
-                    cfg.creep_a_max_init,
-                    cfg.creep_v_cutoff_init,
-                    cfg.creep_v_hold_init,
-                ], dtype=np.float64),
-            ]))
-
-        if params.size == 18:
-            params_wo_L = np.concatenate([params[:5], params[6:]])
-            params_wo_L = np.insert(params_wo_L, 8, cfg.motor_gamma_throttle_init)
-            return _ensure_throttle_tau(np.concatenate([
-                params_wo_L[:9],
-                np.array([
-                    cfg.motor_T_max_init if cfg.motor_T_max_init is not None else (cfg.motor_K_init * (cfg.motor_V_max_init / max(cfg.motor_R_init, 1e-4))),
-                    cfg.motor_P_max_init if cfg.motor_P_max_init is not None else cfg.motor_P_max_bounds[1],
-                ], dtype=np.float64),
-                params_wo_L[9:],
-                np.array([
-                    cfg.creep_a_max_init,
-                    cfg.creep_v_cutoff_init,
-                    cfg.creep_v_hold_init,
-                ], dtype=np.float64),
-            ]))
-
-        if params.size == 8:
+            if new_signature and not old_signature:
+                active_names = names_new_22
+            elif old_signature and not new_signature:
+                active_names = names_old_22
+            else:
+                gamma_lo, gamma_hi = cfg.motor_gamma_throttle_bounds
+                tau_lo, tau_hi = cfg.motor_throttle_tau_bounds
+                looks_new = (
+                    gamma_lo <= params[8] <= gamma_hi
+                    and tau_lo <= params[9] <= tau_hi
+                    and t_lo <= params[10] <= t_hi
+                    and p_lo <= params[11] <= p_hi
+                )
+                active_names = names_new_22 if looks_new else names_old_22
+            active_vals = params
+        elif params.size == 21:
+            active_names = names_old_21
+            active_vals = params
+        elif params.size == 19:
+            active_names = names_old_19
+            active_vals = params
+        elif params.size == 8:
             (
-                mass,
-                drag_area,
-                rolling_coeff,
-                V_max,
-                R,
-                K,
-                gear_ratio,
-                brake_T_max,
+                defaults["mass"],
+                defaults["drag_area"],
+                defaults["rolling_coeff"],
+                defaults["motor_V_max"],
+                defaults["motor_R"],
+                defaults["motor_K"],
+                defaults["gear_ratio"],
+                defaults["brake_T_max"],
             ) = params
-            return _ensure_throttle_tau(np.array([
-                mass,
-                drag_area,
-                rolling_coeff,
-                V_max,
-                R,
-                K,
-                cfg.motor_b_init,
-                cfg.motor_J_init,
-                cfg.motor_gamma_throttle_init,
-                cfg.motor_throttle_tau_init,
-                cfg.motor_T_max_init if cfg.motor_T_max_init is not None else (cfg.motor_K_init * (cfg.motor_V_max_init / max(cfg.motor_R_init, 1e-4))),
-                cfg.motor_P_max_init if cfg.motor_P_max_init is not None else cfg.motor_P_max_bounds[1],
-                gear_ratio,
-                cfg.eta_gb_init,
-                brake_T_max,
-                cfg.brake_tau_init,
-                cfg.brake_p_init,
-                cfg.brake_kappa_init,
-                cfg.mu_init,
-                cfg.wheel_radius_init,
-                cfg.wheel_inertia_init,
-                cfg.creep_a_max_init,
-                cfg.creep_v_cutoff_init,
-                cfg.creep_v_hold_init,
-            ], dtype=np.float64))
+            active_names = []
+            active_vals = np.array([], dtype=np.float64)
+        else:
+            raise ValueError(f"Unsupported parameter length for prediction: {params.size}")
 
-        raise ValueError(f"Unsupported parameter length for prediction: {params.size}")
+        for name, val in zip(active_names, active_vals):
+            if name.startswith("creep_"):
+                continue
+            defaults[name] = float(val)
+
+        return np.array([
+            defaults["mass"],
+            defaults["drag_area"],
+            defaults["rolling_coeff"],
+            defaults["motor_V_max"],
+            defaults["motor_R"],
+            defaults["motor_K"],
+            defaults["motor_b"],
+            defaults["motor_J"],
+            defaults["motor_gamma_throttle"],
+            defaults["motor_throttle_tau"],
+            defaults["motor_T_max"],
+            defaults["motor_P_max"],
+            defaults["gear_ratio"],
+            defaults["eta_gb"],
+            defaults["brake_T_max"],
+            defaults["brake_tau"],
+            defaults["brake_p"],
+            defaults["brake_kappa"],
+            defaults["mu"],
+            defaults["wheel_radius"],
+            defaults["wheel_inertia"],
+            defaults["motor_min_current_A"],
+        ], dtype=np.float64)
 
     def _predict_acceleration(
         self,
@@ -3590,6 +3659,7 @@ class VehicleParamFitter:
             params.motor_b,
             params.motor_J,
             params.motor_gamma_throttle,
+            params.motor_throttle_tau,
             params.motor_T_max if params.motor_T_max is not None else (params.motor_K * (params.motor_V_max / max(params.motor_R, 1e-4))),
             params.motor_P_max if params.motor_P_max is not None else 0.0,
             params.gear_ratio,
@@ -3601,9 +3671,7 @@ class VehicleParamFitter:
             params.mu,
             params.wheel_radius,
             params.wheel_inertia,
-            params.creep_a_max,
-            params.creep_v_cutoff,
-            params.creep_v_hold,
+            params.motor_min_current_A,
         ], dtype=np.float64)
 
         return self._predict_acceleration(param_array, speed, throttle, brake, grade)
@@ -3646,6 +3714,7 @@ class VehicleParamFitter:
             params.motor_b,
             params.motor_J,
             params.motor_gamma_throttle,
+            params.motor_throttle_tau,
             params.motor_T_max if params.motor_T_max is not None else (params.motor_K * (params.motor_V_max / max(params.motor_R, 1e-4))),
             params.motor_P_max if params.motor_P_max is not None else 0.0,
             params.gear_ratio,
@@ -3657,9 +3726,7 @@ class VehicleParamFitter:
             params.mu,
             params.wheel_radius,
             params.wheel_inertia,
-            params.creep_a_max,
-            params.creep_v_cutoff,
-            params.creep_v_hold,
+            params.motor_min_current_A,
         ])
         
         # Simulate all segments
@@ -3733,13 +3800,15 @@ class VehicleParamFitter:
             params.mass, params.drag_area, params.rolling_coeff,
             params.motor_V_max, params.motor_R,
             params.motor_K, params.motor_b, params.motor_J,
+            params.motor_gamma_throttle,
+            params.motor_throttle_tau,
             params.motor_T_max if params.motor_T_max is not None else (params.motor_K * (params.motor_V_max / max(params.motor_R, 1e-4))),
             params.motor_P_max if params.motor_P_max is not None else 0.0,
             params.gear_ratio, params.eta_gb,
             params.brake_T_max, params.brake_tau, params.brake_p,
             params.brake_kappa, params.mu,
             params.wheel_radius, params.wheel_inertia,
-            params.creep_a_max, params.creep_v_cutoff, params.creep_v_hold,
+            params.motor_min_current_A,
         ])
         
         v_sim, _ = self._simulate_segment(param_array, segment)

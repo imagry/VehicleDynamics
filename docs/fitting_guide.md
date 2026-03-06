@@ -212,13 +212,6 @@ The GUI is divided into two main panels:
 - Useful for improving brake parameter fitting
 - Typical range: 0.0-2.0
 
-**Creep Loss Boost**
-- Extra weight multiplier for samples in creep intervals (low speed)
-- Default: 0.0 (no boost)
-- When > 0, creep samples contribute more to loss
-- Useful for improving creep parameter fitting
-- Typical range: 0.0-2.0
-
 **Full-stop loss cap (fraction)**
 - Caps the loss contribution from full-stop segments
 - Default: 0.0 (no cap)
@@ -239,7 +232,7 @@ The GUI is divided into two main panels:
 - Provides more accurate simulation with:
   - Throttle delay and gamma shaping
   - Brake lag dynamics
-  - Creep torque
+  - Minimum motor current floor at zero throttle
   - Current/power/voltage limits
 - When disabled, uses simplified dynamics (faster but less accurate)
 
@@ -327,21 +320,19 @@ The parameter section displays all vehicle parameters organized by category. For
 
 **Parameter Groups (DC Motor Model):**
 - **Body**: mass, drag_area, rolling_coeff
-- **Motor**: motor_V_max, motor_R, motor_K, motor_b, motor_J, motor_gamma_throttle, motor_throttle_tau
+- **Motor**: motor_V_max, motor_R, motor_K, motor_b, motor_J, motor_gamma_throttle, motor_throttle_tau, motor_min_current_A
 - **Motor Limits**: motor_T_max, motor_P_max
 - **Drivetrain**: gear_ratio, eta_gb
 - **Brake**: brake_T_max, brake_tau, brake_p, brake_kappa, mu
 - **Wheel**: wheel_radius, wheel_inertia
-- **Creep**: creep_a_max, creep_v_cutoff, creep_v_hold
 
 **Parameter Groups (Polynomial Motor Model):**
 - **Body**: mass, drag_area, rolling_coeff
-- **Motor**: motor_V_max, motor_gamma_throttle, motor_throttle_tau
+- **Motor**: motor_V_max, motor_gamma_throttle, motor_throttle_tau, motor_min_current_A
 - **Polynomial Coefficients**: 10 coefficients (c_00, c_10, c_01, c_20, c_11, c_02, c_30, c_21, c_12, c_03)
 - **Drivetrain**: gear_ratio, eta_gb
 - **Brake**: brake_T_max, brake_tau, brake_p, brake_kappa, mu
 - **Wheel**: wheel_radius, wheel_inertia
-- **Creep**: creep_a_max, creep_v_cutoff, creep_v_hold
 
 **Note**: If min == max for a parameter, that parameter is fixed (not optimized) at that value.
 

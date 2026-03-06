@@ -22,7 +22,6 @@ from simulation.dynamics import (
     BrakeParams,
     BodyParams,
     WheelParams,
-    CreepParams,
 )
 
 
@@ -37,6 +36,7 @@ def create_electric_sedan() -> ExtendedPlantParams:
         V_max=400.0,
         T_max=300.0,  # Max torque limit
         P_max=150000.0,  # 150 kW max power
+        min_current_A=6.0,
         gear_ratio=9.5,
         eta_gb=0.95,  # High efficiency gearbox
     )
@@ -60,13 +60,7 @@ def create_electric_sedan() -> ExtendedPlantParams:
         inertia=2.0,
     )
     
-    creep = CreepParams(
-        a_max=0.4,  # Moderate creep
-        v_cutoff=1.2,
-        v_hold=0.1,
-    )
-    
-    return ExtendedPlantParams(motor=motor, brake=brake, body=body, wheel=wheel, creep=creep)
+    return ExtendedPlantParams(motor=motor, brake=brake, body=body, wheel=wheel)
 
 
 def create_lightweight_ev() -> ExtendedPlantParams:
@@ -78,6 +72,7 @@ def create_lightweight_ev() -> ExtendedPlantParams:
         b=8e-4,
         J=1e-3,
         V_max=350.0,
+        min_current_A=4.0,
         gear_ratio=12.0,
         eta_gb=0.92,
     )
@@ -101,13 +96,7 @@ def create_lightweight_ev() -> ExtendedPlantParams:
         inertia=1.0,
     )
     
-    creep = CreepParams(
-        a_max=0.6,
-        v_cutoff=1.8,
-        v_hold=0.05,
-    )
-    
-    return ExtendedPlantParams(motor=motor, brake=brake, body=body, wheel=wheel, creep=creep)
+    return ExtendedPlantParams(motor=motor, brake=brake, body=body, wheel=wheel)
 
 
 def simulate_acceleration_test(plant: ExtendedPlant, dt: float = 0.1) -> dict:

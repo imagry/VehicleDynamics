@@ -11,7 +11,7 @@ The simulation uses an **ExtendedPlant** model that includes:
 - **Aerodynamic Drag**: Speed-squared drag force
 - **Rolling Resistance**: Speed-dependent rolling friction
 - **Road Grade**: Gravitational force component
-- **Creep Torque**: EV-style low-speed forward motion
+- **Minimum Current Floor**: Non-zero current mapping at zero throttle
 - **Current/Power/Voltage Limits**: Multi-constraint enforcement
 
 ### System Architecture
@@ -23,10 +23,7 @@ graph TB
     
     B --> D[First-Order Lag<br/>τ_throttle]
     D --> E[Gamma Shaping<br/>θ^γ]
-    E --> F[Current Command<br/>I_creep + u_shaped·I_max]
-    
-    G[Creep Torque] --> F
-    H[Speed v] -->|Fade| G
+    E --> F[Current Command<br/>I_floor + u_shaped·(I_max - I_floor)]
     
     F --> I[Voltage Calculation<br/>V = I·R + K_e·ω_m]
     I --> J[Voltage Limit<br/>V_max]
@@ -40,7 +37,7 @@ graph TB
     L --> O[Motor Omega ω_m]
     O --> P[Wheel Omega ω_w = ω_m/N]
     P --> Q[Vehicle Speed v = ω_w·r_w]
-    Q --> H
+    Q --> I
     
     Q --> R[Forces]
     R --> S[Drag F_drag]
@@ -66,7 +63,7 @@ flowchart LR
     subgraph ThrottlePath["Throttle Path (u > 0)"]
         B[Throttle State θ<br/>First-Order Lag]
         C[Shaped Throttle<br/>θ^γ]
-        D[Target Current<br/>I_creep + θ^γ·I_max]
+        D[Target Current<br/>I_floor + θ^γ·(I_max - I_floor)]
     end
     
     subgraph BrakePath["Brake Path (u < 0)"]
@@ -241,87 +238,18 @@ This allows tuning the throttle feel to match different vehicle characteristics.
 The shaped throttle is converted to a current command:
 
 ```
-target_current = I_creep + u_th_shaped · I_max
+I_floor = max(min_current_A, 0)
+target_current = I_floor + u_th_shaped · max(I_max - I_floor, 0)
 ```
 
 Where:
-- `I_creep`: Creep current (see Creep Torque section)
+- `min_current_A`: Configured motor current floor at zero throttle
+- `I_floor`: Non-negative current floor
 - `I_max`: Maximum current limit (see Limits section)
 
-### Creep Torque
+### Minimum Current Floor at Zero Throttle
 
-EV-style creep provides low-speed forward motion at zero throttle, mimicking ICE idle behavior without introducing idle RPMs or discontinuities.
-
-#### Creep Force to Torque Conversion
-
-Creep is parameterized by maximum acceleration `a_max`:
-
-```
-F_creep_max = m · a_max          [N]  Maximum creep force
-T_wheel_creep_max = F_creep_max · r_w  [Nm] Maximum creep torque at wheel
-T_motor_creep_max = T_wheel_creep_max / (N · η_gb)  [Nm] Maximum creep torque at motor shaft
-```
-
-#### Speed-Dependent Fade
-
-Creep torque fades smoothly with vehicle speed using a power function:
-
-```
-x = |v| / v_cutoff
-w_fade = 1 - x^5    if x < 1
-w_fade = 0          if x ≥ 1
-```
-
-Where:
-- `v`: Current vehicle speed (m/s)
-- `v_cutoff`: Speed where creep fully fades out (typically 1.5 m/s)
-- The `x^5` power function provides a very gentle fade, maintaining ~97% torque at x=0.5 and ~33% at x=0.925
-
-**Creep Fade Curve:**
-
-```mermaid
-graph LR
-    A[Speed v] --> B[Normalize<br/>x = v/v_cutoff]
-    B --> C{Fade Function<br/>w = 1 - x^5}
-    C -->|x < 1| D[Fade Factor w]
-    C -->|x ≥ 1| E[Zero Fade]
-    D --> F[Creep Torque<br/>T_creep = T_max · w]
-    E --> F
-    
-    style A fill:#e1f5ff
-    style C fill:#fff4e1
-    style F fill:#e8f5e9
-```
-
-**Fade Characteristics:**
-- At v = 0: w = 1.0 (100% creep torque)
-- At v = 0.5·v_cutoff: w ≈ 0.97 (97% torque)
-- At v = 0.75·v_cutoff: w ≈ 0.76 (76% torque)
-- At v = v_cutoff: w = 0.0 (0% torque)
-
-#### Brake Interaction
-
-Brake torque subtracts from creep torque:
-
-```
-T_creep_motor = max(0, T_motor_creep_max · w_fade - τ_brake_motor_mag)
-```
-
-Where `τ_brake_motor_mag` is the brake torque magnitude reflected to motor shaft.
-
-#### Standstill Threshold
-
-At very low speeds (`|v| < v_hold`, typically 0.08 m/s), the vehicle is considered at standstill. Brakes can hold the vehicle at rest, clamping motor omega to zero to prevent oscillation.
-
-#### Creep Current
-
-Creep torque is converted to equivalent current for current control:
-
-```
-I_creep = T_creep_motor / K_t
-```
-
-Creep is **always active** and adds to throttle current, ensuring smooth low-speed behavior.
+The model does not use a separate creep torque channel. Instead, zero throttle maps to a configurable minimum current (`min_current_A`). This floor also applies when braking commands are present, while tire force still reflects both motor and brake torques.
 
 ### Current, Power, and Voltage Limits
 
@@ -412,7 +340,8 @@ Where any unspecified limit is treated as ∞.
 The target current command is:
 
 ```
-target_current = I_creep + u_th_shaped · I_max_base
+I_floor = max(min_current_A, 0)
+target_current = I_floor + u_th_shaped · max(I_max_base - I_floor, 0)
 ```
 
 The voltage required to achieve this current is:
@@ -581,6 +510,7 @@ At very low speeds with brakes applied, `ω_m` is clamped to zero to prevent osc
 - `P_max`: Maximum motor power (W, optional) - limits current via `I_max = P_max / V`
 - `gamma_throttle`: Throttle nonlinearity exponent (dimensionless) - typically 0.5-2.0, default 1.0
 - `throttle_tau`: Throttle time constant (s) - typically 0.05-0.30s, default 0.1s
+- `min_current_A`: Minimum current at zero throttle (A) - default 0.0
 - `gear_ratio`: Gear reduction ratio (dimensionless) - typically 4.0-20.0
 - `eta_gb`: Gearbox efficiency (dimensionless) - typically 0.85-0.98
 
@@ -605,12 +535,6 @@ At very low speeds with brakes applied, `ω_m` is clamped to zero to prevent osc
 - `radius`: Wheel radius (m) - typically 0.26-0.38 m
 - `inertia`: Wheel + rotating assembly inertia (kg·m²) - typically 0.5-5.0 kg·m²
 - `v_eps`: Speed threshold for slip calculation (m/s) - default 0.1 m/s
-
-### Creep Parameters (`CreepParams`)
-
-- `a_max`: Maximum creep acceleration (m/s²) - typically 0.3-0.7 m/s², default 0.5 m/s²
-- `v_cutoff`: Speed where creep fully fades out (m/s) - typically 1.0-2.0 m/s, default 1.5 m/s
-- `v_hold`: Standstill threshold (m/s) - typically 0.05-0.15 m/s, default 0.08 m/s
 
 ## Limitations
 
@@ -642,7 +566,6 @@ At very low speeds with brakes applied, the system clamps motor omega to zero to
 ```
 if |v| < v_hold and brake_cmd > threshold:
     ω_m = 0
-    i = 0
     v = 0
     held_by_brakes = True
 ```
@@ -660,7 +583,7 @@ stateDiagram-v2
     Braking --> Standstill: |v| < v_hold AND brake_cmd > threshold
     Standstill --> Moving: throttle > 0 AND |v| > v_hold
     
-    Standstill: ω_m = 0<br/>i = 0<br/>v = 0<br/>held_by_brakes = True
+    Standstill: ω_m = 0<br/>v = 0<br/>held_by_brakes = True
     Moving: Normal dynamics<br/>ω_m ≠ 0
     Braking: Brake applied<br/>ω_m → 0
 ```

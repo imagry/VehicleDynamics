@@ -14,7 +14,6 @@ from simulation.dynamics import (
     BrakeParams,
     BodyParams,
     WheelParams,
-    CreepParams,
 )
 
 __all__ = [
@@ -27,5 +26,4 @@ __all__ = [
     "BrakeParams",
     "BodyParams",
     "WheelParams",
-    "CreepParams",
 ]

@@ -28,6 +28,7 @@ class MotorParams:
     P_max: float | None = None  # max motor power (W) - optional
     gamma_throttle: float = 1.0  # throttle-to-current nonlinearity exponent
     throttle_tau: float = 0.1  # throttle command time constant (s)
+    min_current_A: float = 0.0  # minimum commanded motor current at zero throttle (A)
     gear_ratio: float = 10.0  # gear reduction ratio
     eta_gb: float = 0.9  # gearbox efficiency
 
@@ -58,24 +59,11 @@ class WheelParams:
 
 
 @dataclass(slots=True)
-class CreepParams:
-    """EV-style creep torque parameters.
-    
-    Creep provides low-speed forward motion at zero throttle, mimicking
-    ICE idle behavior without introducing idle RPMs or discontinuities.
-    """
-    a_max: float = 0.5      # [m/s²] maximum creep acceleration
-    v_cutoff: float = 1.5   # [m/s] speed where creep fully fades out
-    v_hold: float = 0.08    # [m/s] standstill region threshold
-
-
-@dataclass(slots=True)
 class ExtendedPlantParams:
     motor: MotorParams = field(default_factory=MotorParams)
     brake: BrakeParams = field(default_factory=BrakeParams)
     body: BodyParams = field(default_factory=BodyParams)
     wheel: WheelParams = field(default_factory=WheelParams)
-    creep: CreepParams = field(default_factory=CreepParams)
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +92,6 @@ class ExtendedPlantState:
     grade_force: float
     net_force: float
     held_by_brakes: bool  # True when vehicle is held at rest by brakes/static friction
-    creep_torque: float  # Creep torque at motor shaft (Nm) - for diagnostics
     coupling_enabled: bool  # True when motor is coupled to wheel (False during braking)
 
 
@@ -142,7 +129,6 @@ class ExtendedPlant:
         self.grade_force = 0.0
         self.net_force = 0.0
         self.held_by_brakes = False
-        self.creep_torque = 0.0  # Initialize creep torque
         self._current_grade_rad = None  # Current grade override (None = use body.grade_rad)
         # Initialize previous motor states for coupling
         self.motor_current_prev = 0.0
@@ -176,7 +162,6 @@ class ExtendedPlant:
             grade_force=self.grade_force,
             net_force=self.net_force,
             held_by_brakes=self.held_by_brakes,
-            creep_torque=self.creep_torque,
             coupling_enabled=self._coupling_enabled,
         )
 
@@ -242,8 +227,7 @@ class ExtendedPlant:
         I_max = (motor.T_max / max(K_t, 1e-9)) if motor.T_max is not None else (motor.V_max / max(R, 1e-9))
         P_max = motor.P_max
         
-        # ===== COMPUTE BRAKE TORQUE EARLY (for creep subtraction) =====
-        # Compute brake torque magnitude to subtract from creep torque
+        # ===== COMPUTE BRAKE TORQUE EARLY =====
         # Brake dynamics (first-order lag)
         denom = 1.0 + brake_params.kappa_c * (1.0 - brake_cmd)
         denom = max(denom, 1e-6)
@@ -252,53 +236,16 @@ class ExtendedPlant:
         
         # Brake torque magnitude at wheel
         tau_brake_mag = max(self.brake_torque, 0.0)
-        
-        # Reflect brake torque to motor shaft (for subtracting from creep)
-        # Use magnitude only - direction will be handled later in brake logic
-        tau_brake_motor_mag = tau_brake_mag / max(eta * N, 1e-12)
-        
-        # ===== CREEP TORQUE COMPUTATION =====
-        # Compute EV-style creep behavior: low-speed forward motion at zero throttle
-        # Creep is parameterized by max acceleration and fades with speed
-        creep = self.params.creep
-        
-        # Step 1: Convert creep acceleration to motor torque (dynamic computation)
-        # This ensures creep adapts to vehicle mass, gear ratio, etc.
-        F_creep_max = body.mass * creep.a_max  # [N] max creep force
-        T_wheel_creep_max = F_creep_max * r_w  # [Nm] max creep torque at wheel
-        T_motor_creep_max = T_wheel_creep_max / (N * eta)  # [Nm] max creep torque at motor shaft
-        
-        # Step 2: Speed-dependent fade using gentler power function
-        # Creep fades smoothly from full at v=0 to zero at v=v_cutoff
-        # Use a gentler fade curve that maintains more torque at higher speeds
-        # Use current motor omega to compute vehicle speed
-        omega_m_current = self.motor_omega
-        v_current = (omega_m_current / N) * r_w  # current vehicle speed from motor
-        v_abs = abs(v_current)
-        x = v_abs / max(creep.v_cutoff, 1e-6)  # normalized speed
-        if x < 1.0:
-            # Use a very gentle power fade: w = 1 - x^5
-            # Original cubic smoothstep: w = 1 - 3x^2 + 2x^3 (maintains ~50% torque at x=0.5)
-            # Power fade: w = 1 - x^5 (maintains ~97% torque at x=0.5, ~33% at x=0.925)
-            # This allows vehicle to reach very close to v_cutoff before equilibrium
-            # The fade starts immediately but decays very slowly, avoiding steep curves
-            w_fade = 1.0 - x**5  # very gentle power fade
-        else:
-            w_fade = 0.0
-        
-        # Step 3: Brake torque subtracts from creep torque
-        # Creep torque is reduced by brake torque magnitude at motor shaft
-        T_creep_motor_unclamped = T_motor_creep_max * w_fade
-        T_creep_motor = max(0.0, T_creep_motor_unclamped - tau_brake_motor_mag)
-        self.creep_torque = float(T_creep_motor)  # Store for diagnostics
-        
-        # Step 4: Convert creep torque to equivalent current (current control)
-        I_creep = T_creep_motor / max(K_t, 1e-9)
 
-        # Current command (creep always active, throttle always adds on top)
-        target_current = I_creep + u_th_shaped * I_max
+        # Current command with a zero-throttle floor.
+        # At 0% throttle -> target_current = min_current_A.
+        # At 100% throttle -> target_current = I_max (subject to power/voltage limits downstream).
+        i_floor = max(motor.min_current_A, 0.0)
+        i_span = max(I_max - i_floor, 0.0)
+        target_current = i_floor + u_th_shaped * i_span
 
         # Compute voltage required to achieve target current
+        omega_m_current = self.motor_omega
         back_emf = K_e * omega_m_current
         v_required = target_current * R + back_emf
         v_applied = min(v_required, motor.V_max) if target_current > 0 else 0.0
@@ -353,7 +300,7 @@ class ExtendedPlant:
         # Sign convention: positive torque in motor equation accelerates motor forward
         # So brake should apply negative torque if moving forward, positive if backward
         # At rest, brake should hold the vehicle
-        v_hold = creep.v_hold  # Use creep parameter for velocity threshold
+        v_hold = max(wheel.v_eps, 0.05)
         v_eps = 0.05  # smooth transition zone
         
         if abs(v_from_rot) < v_hold and tau_brake_mag > 100.0:
@@ -473,14 +420,14 @@ class ExtendedPlant:
         
         # ===== HELD BY BRAKES / ZERO SPEED CLAMPING =====
         # If brakes are applied and speed is very low, clamp to zero to prevent oscillation
-        v_hold_clamp = max(creep.v_hold, 0.05)
+        v_hold_clamp = max(wheel.v_eps, 0.05)
         if brake_cmd > 0.4 and abs(v_new) < v_hold_clamp:
             # Clamp motor omega to zero (vehicle held)
             self.motor_omega = 0.0
-            self.motor_current = 0.0
             v_new = 0.0
             self.held_by_brakes = True
             self.acceleration = 0.0
+            self.back_emf_voltage = 0.0
         else:
             self.held_by_brakes = False
             # Compute acceleration from actual speed change (single-DOF consistent)

@@ -41,7 +41,7 @@ DEFAULT_SENSORS: Dict[str, tuple[str, str]] = {
 class TripParserConfig:
     root_folder: Path = Path("/opt/imagry/trips")
     car_model: str = "ECentro"
-    vehicle_id: Optional[str] = "ECENTRO_HA_03"
+    vehicle_id: Optional[str] = None
     dt: float = 0.02
     out_dir: Path = Path("processed_data/ECentro/ECENTRO_HA_03")
     out_file: str = "all_trips_data.pt"

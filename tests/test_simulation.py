@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from fitting.fitter import FittedVehicleParams, VehicleParamFitter, FitterConfig
-from simulation.dynamics import ExtendedPlant, ExtendedPlantParams, MotorParams, BrakeParams, BodyParams, WheelParams, CreepParams
+from simulation.dynamics import ExtendedPlant, ExtendedPlantParams, MotorParams, BrakeParams, BodyParams, WheelParams
 
 
 class TestEndToEndSimulation:
@@ -75,11 +75,12 @@ class TestEndToEndSimulation:
                 b=fitted.motor_b,
                 J=fitted.motor_J,
                 V_max=fitted.motor_V_max,
+                min_current_A=fitted.motor_min_current_A,
                 gear_ratio=fitted.gear_ratio,
                 eta_gb=fitted.eta_gb,
             )
             
-            brake = BrakeParams(
+            brake_params = BrakeParams(
                 T_br_max=fitted.brake_T_max,
                 p_br=fitted.brake_p,
                 tau_br=fitted.brake_tau,
@@ -97,14 +98,8 @@ class TestEndToEndSimulation:
                 radius=fitted.wheel_radius,
                 inertia=fitted.wheel_inertia,
             )
-            
-            creep = CreepParams(
-                a_max=fitted.creep_a_max,
-                v_cutoff=fitted.creep_v_cutoff,
-                v_hold=fitted.creep_v_hold,
-            )
-            
-            plant_params = ExtendedPlantParams(motor=motor, brake=brake, body=body, wheel=wheel, creep=creep)
+
+            plant_params = ExtendedPlantParams(motor=motor, brake=brake_params, body=body, wheel=wheel)
             plant = ExtendedPlant(plant_params)
             
             # Run simulation

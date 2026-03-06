@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from fitting.fitter import FittedVehicleParams
-from simulation.dynamics import ExtendedPlant, ExtendedPlantParams, MotorParams, BrakeParams, BodyParams, WheelParams, CreepParams
+from simulation.dynamics import ExtendedPlant, ExtendedPlantParams, MotorParams, BrakeParams, BodyParams, WheelParams
 
 
 def load_fitted_params(path: Path) -> FittedVehicleParams:
@@ -42,6 +42,7 @@ def fitted_to_extended_params(fitted: FittedVehicleParams) -> ExtendedPlantParam
         P_max=fitted.motor_P_max,
         gamma_throttle=fitted.motor_gamma_throttle,
         throttle_tau=fitted.motor_throttle_tau,
+        min_current_A=fitted.motor_min_current_A,
         gear_ratio=fitted.gear_ratio,
         eta_gb=fitted.eta_gb,
     )
@@ -66,13 +67,7 @@ def fitted_to_extended_params(fitted: FittedVehicleParams) -> ExtendedPlantParam
         inertia=fitted.wheel_inertia,
     )
     
-    creep = CreepParams(
-        a_max=fitted.creep_a_max,
-        v_cutoff=fitted.creep_v_cutoff,
-        v_hold=fitted.creep_v_hold,
-    )
-    
-    return ExtendedPlantParams(motor=motor, brake=brake, body=body, wheel=wheel, creep=creep)
+    return ExtendedPlantParams(motor=motor, brake=brake, body=body, wheel=wheel)
 
 
 def plot_simulation_results(results: dict, plot_path: Path | None = None) -> None:
@@ -81,7 +76,7 @@ def plot_simulation_results(results: dict, plot_path: Path | None = None) -> Non
     Creates a figure with multiple subplots in a single column, all sharing the x-axis (time).
     """
     time = results["time"]
-    n_plots = 15  # Total number of subplots
+    n_plots = 14  # Total number of subplots
     
     fig, axes = plt.subplots(n_plots, 1, figsize=(12, 3 * n_plots), sharex=True)
     fig.suptitle("Simulation Results - All States", fontsize=14, fontweight='bold')
@@ -144,7 +139,11 @@ def plot_simulation_results(results: dict, plot_path: Path | None = None) -> Non
     ax = axes[plot_idx]
     ax.plot(time, results["motor_current"], "orange", linewidth=2)
     if "i_limit" in results:
-        ax.plot(time, results["i_limit"], "r--", label="Current Limit", linewidth=1.5, alpha=0.7)
+        ax.plot(time, results["i_limit"], "r--", label="Dynamic Current Limit", linewidth=1.5, alpha=0.7)
+    if "i_limit_static" in results:
+        ax.axhline(y=results["i_limit_static"], color="tab:purple", linestyle=":", label="Static Current Limit", alpha=0.8)
+        ax.axhline(y=-results["i_limit_static"], color="tab:purple", linestyle=":", alpha=0.4)
+    if "i_limit" in results or "i_limit_static" in results:
         ax.legend(loc="best")
     ax.set_ylabel("Current (A)")
     ax.grid(True, alpha=0.3)
@@ -165,16 +164,24 @@ def plot_simulation_results(results: dict, plot_path: Path | None = None) -> Non
     ax.set_title("Motor Voltage")
     plot_idx += 1
     
-    # 8. Motor Torque
+    # 8. Drive / Motor Torque
     ax = axes[plot_idx]
-    ax.plot(time, results["drive_torque"], "cyan", linewidth=2, label="Drive Torque")
+    ax.plot(time, results["drive_torque"], "cyan", linewidth=2, label="Drive Torque (Wheel)")
+    if "motor_shaft_torque" in results:
+        ax.plot(time, results["motor_shaft_torque"], "tab:blue", linewidth=1.5, linestyle="--", label="Motor Shaft Torque")
     if "T_max" in results and results["T_max"] is not None:
-        ax.axhline(y=results["T_max"], color="r", linestyle="--", label="T_max", alpha=0.7)
-        ax.axhline(y=-results["T_max"], color="r", linestyle="--", alpha=0.7)
+        # Motor torque limit (shaft-side) and equivalent wheel-side limit.
+        t_max_motor = float(results["T_max"])
+        ax.axhline(y=t_max_motor, color="r", linestyle="--", label="T_max (Motor)", alpha=0.7)
+        ax.axhline(y=-t_max_motor, color="r", linestyle="--", alpha=0.7)
+        if "gear_ratio" in results and "eta_gb" in results:
+            t_max_wheel = t_max_motor * float(results["gear_ratio"]) * float(results["eta_gb"])
+            ax.axhline(y=t_max_wheel, color="tab:purple", linestyle=":", label="T_max (Wheel)", alpha=0.7)
+            ax.axhline(y=-t_max_wheel, color="tab:purple", linestyle=":", alpha=0.7)
         ax.legend(loc="best")
     ax.set_ylabel("Torque (Nm)")
     ax.grid(True, alpha=0.3)
-    ax.set_title("Motor Drive Torque")
+    ax.set_title("Drive Torque (Wheel + Motor Shaft)")
     plot_idx += 1
     
     # 9. Motor Power
@@ -201,15 +208,7 @@ def plot_simulation_results(results: dict, plot_path: Path | None = None) -> Non
     ax.set_title("Brake Torque")
     plot_idx += 1
     
-    # 11. Creep Torque
-    ax = axes[plot_idx]
-    ax.plot(time, results["creep_torque"], "yellow", linewidth=2)
-    ax.set_ylabel("Torque (Nm)")
-    ax.grid(True, alpha=0.3)
-    ax.set_title("Creep Torque")
-    plot_idx += 1
-    
-    # 12. Forces
+    # 11. Forces
     ax = axes[plot_idx]
     ax.plot(time, results["tire_force"], "b-", label="Tire", linewidth=2)
     ax.plot(time, results["drag_force"], "g-", label="Drag", linewidth=2)
@@ -222,7 +221,7 @@ def plot_simulation_results(results: dict, plot_path: Path | None = None) -> Non
     ax.set_title("Forces")
     plot_idx += 1
     
-    # 13. Wheel Angular Speed and Slip
+    # 12. Wheel Angular Speed and Slip
     ax = axes[plot_idx]
     ax_twin = ax.twinx()
     ax.plot(time, results["wheel_omega"], "blue", linewidth=2, label="Wheel ω")
@@ -235,7 +234,7 @@ def plot_simulation_results(results: dict, plot_path: Path | None = None) -> Non
     ax.set_title("Wheel Angular Speed and Slip Ratio")
     plot_idx += 1
     
-    # 14. Position
+    # 13. Position
     ax = axes[plot_idx]
     ax.plot(time, results["position"], "green", linewidth=2)
     ax.set_ylabel("Position (m)")
@@ -243,7 +242,7 @@ def plot_simulation_results(results: dict, plot_path: Path | None = None) -> Non
     ax.set_title("Vehicle Position")
     plot_idx += 1
     
-    # 15. Status Flags
+    # 14. Status Flags
     ax = axes[plot_idx]
     ax.plot(time, results["held_by_brakes"].astype(float), "r-", label="Held by Brakes", linewidth=2)
     ax.plot(time, results["coupling_enabled"].astype(float), "b-", label="Coupling Enabled", linewidth=2)
@@ -312,9 +311,9 @@ def simulate_from_trip_data(
         "back_emf_voltage": np.zeros(n),
         "i_limit": np.zeros(n),
         "drive_torque": np.zeros(n),
-        # Brake and creep
+        "motor_shaft_torque": np.zeros(n),
+        # Brake
         "brake_torque": np.zeros(n),
-        "creep_torque": np.zeros(n),
         # Forces
         "tire_force": np.zeros(n),
         "drag_force": np.zeros(n),
@@ -332,8 +331,15 @@ def simulate_from_trip_data(
         "coupling_enabled": np.zeros(n, dtype=bool),
         # Limits (for plotting)
         "V_max": plant_params.motor.V_max,
+        "i_limit_static": (
+            (plant_params.motor.T_max / max(plant_params.motor.K_t, 1e-9))
+            if plant_params.motor.T_max is not None
+            else (plant_params.motor.V_max / max(plant_params.motor.R, 1e-9))
+        ),
         "T_max": plant_params.motor.T_max,
         "P_max": plant_params.motor.P_max,
+        "gear_ratio": plant_params.motor.gear_ratio,
+        "eta_gb": plant_params.motor.eta_gb,
         "brake_T_max": plant_params.brake.T_br_max,
     }
     
@@ -346,8 +352,8 @@ def simulate_from_trip_data(
     results["back_emf_voltage"][0] = state.back_emf_voltage
     results["i_limit"][0] = state.i_limit
     results["drive_torque"][0] = state.drive_torque
+    results["motor_shaft_torque"][0] = state.drive_torque / max(plant_params.motor.eta_gb * plant_params.motor.gear_ratio, 1e-9)
     results["brake_torque"][0] = state.brake_torque
-    results["creep_torque"][0] = state.creep_torque
     results["tire_force"][0] = state.tire_force
     results["drag_force"][0] = state.drag_force
     results["rolling_force"][0] = state.rolling_force
@@ -378,8 +384,8 @@ def simulate_from_trip_data(
         results["back_emf_voltage"][t + 1] = state.back_emf_voltage
         results["i_limit"][t + 1] = state.i_limit
         results["drive_torque"][t + 1] = state.drive_torque
+        results["motor_shaft_torque"][t + 1] = state.drive_torque / max(plant_params.motor.eta_gb * plant_params.motor.gear_ratio, 1e-9)
         results["brake_torque"][t + 1] = state.brake_torque
-        results["creep_torque"][t + 1] = state.creep_torque
         results["tire_force"][t + 1] = state.tire_force
         results["drag_force"][t + 1] = state.drag_force
         results["rolling_force"][t + 1] = state.rolling_force
@@ -454,9 +460,9 @@ def simulate_synthetic(
         "back_emf_voltage": np.zeros(n),
         "i_limit": np.zeros(n),
         "drive_torque": np.zeros(n),
-        # Brake and creep
+        "motor_shaft_torque": np.zeros(n),
+        # Brake
         "brake_torque": np.zeros(n),
-        "creep_torque": np.zeros(n),
         # Forces
         "tire_force": np.zeros(n),
         "drag_force": np.zeros(n),
@@ -474,8 +480,15 @@ def simulate_synthetic(
         "coupling_enabled": np.zeros(n, dtype=bool),
         # Limits (for plotting)
         "V_max": plant_params.motor.V_max,
+        "i_limit_static": (
+            (plant_params.motor.T_max / max(plant_params.motor.K_t, 1e-9))
+            if plant_params.motor.T_max is not None
+            else (plant_params.motor.V_max / max(plant_params.motor.R, 1e-9))
+        ),
         "T_max": plant_params.motor.T_max,
         "P_max": plant_params.motor.P_max,
+        "gear_ratio": plant_params.motor.gear_ratio,
+        "eta_gb": plant_params.motor.eta_gb,
         "brake_T_max": plant_params.brake.T_br_max,
     }
     
@@ -487,8 +500,8 @@ def simulate_synthetic(
     results["back_emf_voltage"][0] = state.back_emf_voltage
     results["i_limit"][0] = state.i_limit
     results["drive_torque"][0] = state.drive_torque
+    results["motor_shaft_torque"][0] = state.drive_torque / max(plant_params.motor.eta_gb * plant_params.motor.gear_ratio, 1e-9)
     results["brake_torque"][0] = state.brake_torque
-    results["creep_torque"][0] = state.creep_torque
     results["tire_force"][0] = state.tire_force
     results["drag_force"][0] = state.drag_force
     results["rolling_force"][0] = state.rolling_force
@@ -515,8 +528,8 @@ def simulate_synthetic(
         results["back_emf_voltage"][t + 1] = state.back_emf_voltage
         results["i_limit"][t + 1] = state.i_limit
         results["drive_torque"][t + 1] = state.drive_torque
+        results["motor_shaft_torque"][t + 1] = state.drive_torque / max(plant_params.motor.eta_gb * plant_params.motor.gear_ratio, 1e-9)
         results["brake_torque"][t + 1] = state.brake_torque
-        results["creep_torque"][t + 1] = state.creep_torque
         results["tire_force"][t + 1] = state.tire_force
         results["drag_force"][t + 1] = state.drag_force
         results["rolling_force"][t + 1] = state.rolling_force
