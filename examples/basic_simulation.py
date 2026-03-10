@@ -257,7 +257,6 @@ def main() -> None:
         T_br_max=15000.0,
         p_br=1.2,
         tau_br=0.08,
-        kappa_c=0.08,
         mu=0.9,
     )
     

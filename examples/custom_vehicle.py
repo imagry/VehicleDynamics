@@ -45,7 +45,6 @@ def create_electric_sedan() -> ExtendedPlantParams:
         T_br_max=18000.0,  # Strong brakes
         p_br=1.3,
         tau_br=0.06,  # Fast brake response
-        kappa_c=0.1,
         mu=0.95,  # High friction tires
     )
     
@@ -81,7 +80,6 @@ def create_lightweight_ev() -> ExtendedPlantParams:
         T_br_max=12000.0,
         p_br=1.2,
         tau_br=0.08,
-        kappa_c=0.08,
         mu=0.85,
     )
     

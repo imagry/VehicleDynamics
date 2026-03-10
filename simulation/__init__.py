@@ -15,6 +15,16 @@ from simulation.dynamics import (
     BodyParams,
     WheelParams,
 )
+from simulation.inverse_dynamics import (
+    AnalyticInverseFeedforward,
+    InverseFeedforwardResult,
+    compute_feedforward_action,
+)
+from simulation.feedforward_controller import (
+    FeedforwardController,
+    FeedforwardProfileResult,
+    FeedforwardClosedLoopResult,
+)
 
 __all__ = [
     "GRAVITY",
@@ -26,4 +36,10 @@ __all__ = [
     "BrakeParams",
     "BodyParams",
     "WheelParams",
+    "AnalyticInverseFeedforward",
+    "InverseFeedforwardResult",
+    "compute_feedforward_action",
+    "FeedforwardController",
+    "FeedforwardProfileResult",
+    "FeedforwardClosedLoopResult",
 ]

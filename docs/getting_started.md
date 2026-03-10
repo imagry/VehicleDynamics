@@ -66,6 +66,41 @@ Or use the GUI:
 python examples/gui_usage.py
 ```
 
+### 2a. Fetch Raw Trips (GUI)
+
+Use the dedicated fetching GUI to download trips from S3 without CLI flags:
+
+```bash
+python scripts/fetch_trips_gui.py
+```
+
+Equivalent CLI:
+
+```bash
+python scripts/fetch_trips.py \
+    --car NiroEV \
+    --start 2024-01-01 \
+    --end 2024-01-07 \
+    --dest data/raw/trips
+```
+
+### 2b. Parse Trips Into Dataset (GUI)
+
+Use the dedicated parser GUI to build `.pt` datasets from raw trip folders:
+
+```bash
+python scripts/parse_trips_gui.py
+```
+
+Equivalent CLI:
+
+```bash
+python scripts/parse_trips.py \
+    --root data/raw/trips \
+    --car NiroEV \
+    --out-dir data/processed/NiroEV
+```
+
 ### 3. Run Simulation with Fitted Parameters
 
 ```bash

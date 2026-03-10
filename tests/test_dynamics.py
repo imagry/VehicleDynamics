@@ -110,6 +110,18 @@ class TestExtendedPlantDynamics:
         accel_std = np.std(accelerations)
         assert accel_std < 15.0, f"Braking too erratic, std={accel_std}"
 
+    def test_brake_command_steady_state_power_law(self, plant: ExtendedPlant) -> None:
+        """Steady brake torque should converge to T_br_max * u_br^p_br."""
+        dt = 0.02
+        u_br = 0.6
+        plant.reset(speed=15.0)
+
+        for _ in range(300):
+            plant.step(-u_br, dt)
+
+        expected = plant.params.brake.T_br_max * (u_br ** plant.params.brake.p_br)
+        assert np.isclose(plant.brake_torque, expected, rtol=0.03, atol=2.0)
+
     def test_throttle_to_brake_transition(self, plant: ExtendedPlant) -> None:
         """Test smooth transition from throttle to brake."""
         dt = 0.1

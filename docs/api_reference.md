@@ -28,6 +28,58 @@ Vehicle parameter container.
 - `body`: `BodyParams` - Body parameters
 - `wheel`: `WheelParams` - Wheel parameters
 
+### `simulation.inverse_dynamics`
+
+#### `AnalyticInverseFeedforward`
+
+Closed-form feedforward inverse that maps target acceleration to signed action.
+
+**Methods:**
+- `compute_action(target_accel: float, speed: float, grade_rad: float | None = None) -> InverseFeedforwardResult`
+- `__call__(target_accel: float, speed: float, grade_rad: float | None = None) -> InverseFeedforwardResult`
+
+**Notes:**
+- Uses algebraic inversion only (no search/bisection).
+- Does not enforce internal feasibility clipping from physical limits.
+- Applies only final command clipping to `[-1, 1]`.
+
+#### `InverseFeedforwardResult`
+
+Result payload for inverse feedforward queries.
+
+**Key fields:**
+- `raw_action`: Unconstrained analytic command.
+- `action`: Final clipped command in `[-1, 1]`.
+- `was_clipped`: Whether final clipping changed the command.
+- `mode`: Inversion branch (`drive` or `brake`).
+
+#### `compute_feedforward_action`
+
+One-shot convenience wrapper:
+- `compute_feedforward_action(target_accel: float, speed: float, params: ExtendedPlantParams, grade_rad: float | None = None) -> InverseFeedforwardResult`
+
+### `simulation.feedforward_controller`
+
+#### `FeedforwardController`
+
+Profile-level runtime wrapper around the analytic inverse model.
+
+**Methods:**
+- `compute_action_profile(target_accel_profile, speed_profile, grade_profile=None) -> FeedforwardProfileResult`
+- `rollout_action_profile(target_accel_profile, initial_speed, dt, grade_profile=None, substeps=1) -> FeedforwardClosedLoopResult`
+
+#### `FeedforwardProfileResult`
+
+Batch mapping output with:
+- `raw_action`, `action`, `was_clipped`, `mode`
+- aligned `target_accel`, `speed`, `grade_rad`
+
+#### `FeedforwardClosedLoopResult`
+
+Closed-loop rollout output with:
+- feedforward traces (`raw_action`, `action`, `was_clipped`, `mode`)
+- realized states (`speed`, `acceleration`)
+
 ## Parameter Fitting
 
 ### `fitting.fitter`
@@ -61,6 +113,15 @@ Downloads trip data from S3.
 **Methods:**
 - `run() -> None`
 
+### `data.fetch_gui`
+
+#### `FetchTripsGUI`
+
+Tkinter GUI for configuring and running trip downloads.
+
+**Entry Point:**
+- `main() -> None`
+
 ### `data.parsing`
 
 #### `TripDatasetParser`
@@ -70,6 +131,15 @@ Parses raw trip folders into synchronized datasets.
 **Methods:**
 - `parse() -> dict[str, dict[str, np.ndarray]]`
 - `save() -> Path`
+
+### `data.parsing_gui`
+
+#### `TripParsingGUI`
+
+Tkinter GUI for configuring and running trip parsing.
+
+**Entry Point:**
+- `main() -> None`
 
 ## Utilities
 
@@ -84,6 +154,24 @@ Creates parameter randomization ranges centered on fitted parameters.
 - `to_extended_randomization_dict() -> Dict`
 
 ## Command-Line Scripts
+
+### `scripts/fetch_trips_gui.py`
+
+Launch the trip fetching GUI.
+
+**Usage:**
+```bash
+python scripts/fetch_trips_gui.py
+```
+
+### `scripts/parse_trips_gui.py`
+
+Launch the trip parsing GUI.
+
+**Usage:**
+```bash
+python scripts/parse_trips_gui.py
+```
 
 ### `scripts/simulate_trip.py`
 
@@ -130,6 +218,22 @@ The plot includes 14 subplots in a single column, all sharing the x-axis (time):
 12. Wheel Angular Speed and Slip Ratio
 13. Vehicle Position
 14. Status Flags (held by brakes, coupling enabled)
+
+### `scripts/feedforward_trip.py`
+
+Generate feedforward traces (`raw_action` and clipped `action`) from a parsed trip file.
+
+**Usage:**
+```bash
+python scripts/feedforward_trip.py \
+    --trip-data <trip_data.pt> \
+    --output <feedforward_traces.npz> \
+    [--params <fitted_params.json>] \
+    [--trip-id <trip_key>] \
+    [--dt <seconds>] \
+    [--angle-is-deg] \
+    [--substeps <n>]
+```
 
 ## Examples
 

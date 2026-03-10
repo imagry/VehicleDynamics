@@ -16,6 +16,7 @@ from fitting import (
     FitterConfig,
     VehicleParamFitter,
 )
+from fitting.fitter import TripSegment
 from utils.randomization import CenteredRandomizationConfig
 from utils.randomization import ExtendedPlantRandomization
 
@@ -39,7 +40,6 @@ class TestFittedVehicleParams:
             brake_T_max=15000.0,
             brake_tau=0.08,
             brake_p=1.5,
-            brake_kappa=0.1,
             mu=0.85,
             wheel_radius=0.346,
             wheel_inertia=2.0,
@@ -77,7 +77,6 @@ class TestFittedVehicleParams:
             brake_T_max=18000.0,
             brake_tau=0.08,
             brake_p=1.5,
-            brake_kappa=0.1,
             mu=0.85,
             wheel_radius=0.340,
             wheel_inertia=2.0,
@@ -142,7 +141,6 @@ class TestFittedVehicleParams:
             brake_T_max=16000.0,
             brake_tau=0.08,
             brake_p=1.5,
-            brake_kappa=0.1,
             mu=0.85,
             wheel_radius=0.350,
             wheel_inertia=2.0,
@@ -184,7 +182,6 @@ class TestFittedVehicleParams:
             brake_T_max=15000.0,
             brake_tau=0.08,
             brake_p=1.5,
-            brake_kappa=0.1,
             mu=0.85,
             wheel_radius=0.346,
             wheel_inertia=2.0,
@@ -200,6 +197,7 @@ class TestFittedVehicleParams:
         assert plant_dict["gear_ratio"] == 10.0
         assert plant_dict["mass"] == 1800.0
         assert plant_dict["brake"]["T_max"] == 15000.0
+        assert "kappa_c" not in plant_dict["brake"]
 
 
 class TestFitterConfig:
@@ -217,6 +215,13 @@ class TestFitterConfig:
         assert config.gear_ratio_init == 10.0
         assert config.min_speed == 0.5
         assert config.max_accel == 6.0
+        assert config.optimize_without_grade is False
+        assert config.use_uniform_speed_accel_bin_loss is False
+        assert config.speed_accel_speed_bins == 20
+        assert config.speed_accel_accel_bins == 20
+        assert config.speed_accel_speed_range == (0.0, 25.0)
+        assert config.speed_accel_accel_range == (-4.0, 4.0)
+        assert config.speed_accel_bin_weight_cap == 10.0
     
     def test_custom_config(self) -> None:
         """Test custom configuration values."""
@@ -227,6 +232,13 @@ class TestFitterConfig:
             motor_R_init=0.15,
             batch_size=10000,
             num_epochs=3,
+            optimize_without_grade=True,
+            use_uniform_speed_accel_bin_loss=True,
+            speed_accel_speed_bins=12,
+            speed_accel_accel_bins=9,
+            speed_accel_speed_range=(0.0, 30.0),
+            speed_accel_accel_range=(-5.0, 5.0),
+            speed_accel_bin_weight_cap=5.0,
         )
         
         assert config.wheel_radius == 0.330
@@ -235,6 +247,13 @@ class TestFitterConfig:
         assert config.motor_R_init == 0.15
         assert config.batch_size == 10000
         assert config.num_epochs == 3
+        assert config.optimize_without_grade is True
+        assert config.use_uniform_speed_accel_bin_loss is True
+        assert config.speed_accel_speed_bins == 12
+        assert config.speed_accel_accel_bins == 9
+        assert config.speed_accel_speed_range == (0.0, 30.0)
+        assert config.speed_accel_accel_range == (-5.0, 5.0)
+        assert config.speed_accel_bin_weight_cap == 5.0
 
 
 class TestVehicleParamFitter:
@@ -388,6 +407,186 @@ class TestVehicleParamFitter:
         assert all(np.isfinite(a_pred))
         # At constant throttle, higher speeds should have lower acceleration (back-EMF)
         assert a_pred[0] > a_pred[-1]
+
+    def test_optimize_without_grade_ignores_grade_in_acceleration(self) -> None:
+        """When enabled, optimization dynamics should ignore road grade in acceleration."""
+        params = np.array([
+            1800.0,   # mass
+            0.7,      # drag_area
+            0.01,     # rolling_coeff
+            400.0,    # V_max
+            0.2,      # R
+            0.2,      # K
+            0.0005,   # b
+            0.001,    # J
+            1.0,      # gamma_throttle
+            0.1,      # throttle_tau
+            300.0,    # T_max
+            100000.0, # P_max
+            10.0,     # gear_ratio
+            0.92,     # eta
+            15000.0,  # brake_T_max
+            0.08,     # brake_tau
+            1.2,      # brake_p
+            0.9,      # mu
+            0.346,    # wheel_radius
+            1.5,      # wheel_inertia
+            0.0,      # motor_min_current_A
+        ], dtype=np.float64)
+
+        speed = 10.0
+        throttle = 40.0
+        brake = 0.0
+        uphill_grade = 0.1
+
+        fitter_with_grade = VehicleParamFitter(FitterConfig(optimize_without_grade=False))
+        accel_flat = fitter_with_grade._compute_acceleration(params, speed, throttle, brake, 0.0)
+        accel_uphill = fitter_with_grade._compute_acceleration(params, speed, throttle, brake, uphill_grade)
+        assert accel_uphill < accel_flat
+
+        fitter_no_grade = VehicleParamFitter(FitterConfig(optimize_without_grade=True))
+        accel_uphill_ignored = fitter_no_grade._compute_acceleration(params, speed, throttle, brake, uphill_grade)
+        assert np.isclose(accel_uphill_ignored, accel_flat, rtol=0.0, atol=1e-9)
+
+    def test_brake_torque_power_law_in_acceleration_model(self) -> None:
+        """Braking in fitter acceleration model should follow T_max * u^p (no kappa)."""
+        fitter = VehicleParamFitter(FitterConfig())
+        params = np.array([
+            1000.0,   # mass
+            0.0,      # drag_area
+            0.0,      # rolling_coeff
+            400.0,    # V_max
+            0.2,      # R
+            0.2,      # K
+            0.0,      # b
+            0.0,      # J
+            1.0,      # gamma_throttle
+            0.1,      # throttle_tau
+            300.0,    # T_max
+            0.0,      # P_max
+            10.0,     # gear_ratio
+            1.0,      # eta
+            12000.0,  # brake_T_max
+            0.08,     # brake_tau
+            2.0,      # brake_p
+            0.9,      # mu
+            0.3,      # wheel_radius
+            0.0,      # wheel_inertia
+            0.0,      # motor_min_current_A
+        ], dtype=np.float64)
+
+        brake = 50.0
+        accel = fitter._compute_acceleration(params, speed=0.0, throttle=0.0, brake=brake, grade=0.0)
+        brake_cmd = brake / 100.0
+        expected_force = 12000.0 * (brake_cmd ** 2.0) / 0.3
+        expected_accel = -expected_force / 1000.0
+        assert np.isclose(accel, expected_accel, rtol=0.0, atol=1e-9)
+
+    def test_param_names_drop_brake_kappa(self) -> None:
+        """Both DC and polynomial parameter vectors should exclude brake_kappa."""
+        fitter_dc = VehicleParamFitter(FitterConfig(motor_model_type="dc"))
+        assert "brake_kappa" not in fitter_dc.PARAM_NAMES
+        assert len(fitter_dc.PARAM_NAMES) == 21
+        assert fitter_dc.PARAM_NAMES[17] == "mu"
+
+        fitter_poly = VehicleParamFitter(FitterConfig(motor_model_type="polynomial"))
+        assert "brake_kappa" not in fitter_poly.PARAM_NAMES
+        assert len(fitter_poly.PARAM_NAMES) == 25
+        assert fitter_poly.PARAM_NAMES[21] == "mu"
+
+    def test_compute_speed_accel_distribution_counts(self) -> None:
+        """Distribution helper should produce consistent bin counts and totals."""
+        fitter = VehicleParamFitter(
+            FitterConfig(
+                speed_accel_speed_bins=2,
+                speed_accel_accel_bins=2,
+            )
+        )
+        segments = [
+            TripSegment(
+                trip_id="trip_a",
+                speed=np.array([0.0, 1.0, 9.0], dtype=np.float64),
+                acceleration=np.array([0.0, 1.0, 9.0], dtype=np.float64),
+                throttle=np.zeros(3, dtype=np.float64),
+                brake=np.zeros(3, dtype=np.float64),
+                grade=np.zeros(3, dtype=np.float64),
+                dt=0.1,
+            ),
+            TripSegment(
+                trip_id="trip_b",
+                speed=np.array([10.0], dtype=np.float64),
+                acceleration=np.array([10.0], dtype=np.float64),
+                throttle=np.zeros(1, dtype=np.float64),
+                brake=np.zeros(1, dtype=np.float64),
+                grade=np.zeros(1, dtype=np.float64),
+                dt=0.1,
+            ),
+        ]
+
+        distribution = fitter.compute_speed_accel_distribution(segments)
+        counts = distribution["counts"]
+
+        assert counts.shape == (2, 2)
+        assert np.allclose(distribution["speed_edges"], np.array([0.0, 12.5, 25.0]))
+        assert np.allclose(distribution["accel_edges"], np.array([-4.0, 0.0, 4.0]))
+        assert int(np.sum(counts)) == 4
+        assert int(distribution["total_samples"][0]) == 4
+        assert int(distribution["nonzero_bins"][0]) >= 1
+
+    def test_apply_uniform_speed_accel_bucket_weights_inverse_frequency(self) -> None:
+        """Rare bins should receive larger weights and average sample weight should be ~1."""
+        fitter = VehicleParamFitter(
+            FitterConfig(
+                speed_accel_speed_bins=2,
+                speed_accel_accel_bins=2,
+                speed_accel_bin_weight_cap=10.0,
+            )
+        )
+        segment = TripSegment(
+            trip_id="trip_weighted",
+            speed=np.array([2.0, 2.0, 2.0, 2.0, 20.0], dtype=np.float64),
+            acceleration=np.array([1.0, 1.0, 1.0, 1.0, -2.0], dtype=np.float64),
+            throttle=np.zeros(5, dtype=np.float64),
+            brake=np.zeros(5, dtype=np.float64),
+            grade=np.zeros(5, dtype=np.float64),
+            dt=0.1,
+        )
+
+        distribution = fitter.apply_uniform_speed_accel_bucket_weights([segment])
+        weights = segment.sample_weights
+
+        assert weights is not None
+        assert weights.shape == (5,)
+        assert weights[-1] > weights[0]
+        assert np.isclose(float(np.mean(weights)), 1.0, atol=1e-9)
+        assert "weight_map" in distribution
+
+    def test_trajectory_loss_respects_sample_weights(self) -> None:
+        """Per-sample weights should change loss contribution in CPU loss path."""
+        fitter = VehicleParamFitter(FitterConfig(speed_loss_weight=1.0, accel_loss_weight=0.0))
+        segment = TripSegment(
+            trip_id="trip_loss",
+            speed=np.array([0.0, 0.0], dtype=np.float64),
+            acceleration=np.array([0.0, 0.0], dtype=np.float64),
+            throttle=np.zeros(2, dtype=np.float64),
+            brake=np.zeros(2, dtype=np.float64),
+            grade=np.zeros(2, dtype=np.float64),
+            dt=0.1,
+        )
+
+        fitter._simulate_segment = lambda _params, _segment, **_kwargs: (
+            np.array([2.0, 0.0], dtype=np.float64),
+            np.array([0.0, 0.0], dtype=np.float64),
+        )
+        params = np.zeros(len(fitter.PARAM_NAMES), dtype=np.float64)
+
+        segment.sample_weights = np.array([1.0, 1.0], dtype=np.float64)
+        baseline_loss = fitter._trajectory_loss(params, [segment])
+
+        segment.sample_weights = np.array([10.0, 1.0], dtype=np.float64)
+        weighted_loss = fitter._trajectory_loss(params, [segment])
+
+        assert weighted_loss > baseline_loss
 
 
 class TestCenteredRandomizationConfig:

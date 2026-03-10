@@ -66,7 +66,6 @@ class ExtendedPlantRandomization:
     brake_tau_range: Tuple[float, float] = (0.04, 0.12)  # seconds - brake time constant
     brake_accel_range: Tuple[float, float] = (8.0, 11.0)  # m/s² - max braking deceleration magnitude
     brake_p_range: Tuple[float, float] = (1.0, 1.8)  # brake exponent (per doc)
-    brake_kappa_range: Tuple[float, float] = (0.02, 0.25)  # brake slip constant
     mu_range: Tuple[float, float] = (0.7, 1.0)  # tire friction coefficient
 
     # Wheel parameters
@@ -109,7 +108,6 @@ class ExtendedPlantRandomization:
             brake_tau_range=tuple(vr_config.get('brake_tau_range', (0.04, 0.12))),
             brake_accel_range=tuple(vr_config.get('brake_accel_range', (8.0, 11.0))),
             brake_p_range=tuple(vr_config.get('brake_p_range', (1.0, 1.8))),
-            brake_kappa_range=tuple(vr_config.get('brake_kappa_range', (0.02, 0.25))),
             mu_range=tuple(vr_config.get('mu_range', (0.7, 1.0))),
             wheel_radius_range=tuple(vr_config.get('wheel_radius_range', (0.26, 0.38))),
             wheel_inertia_range=tuple(vr_config.get('wheel_inertia_range', (0.5, 5.0))),
@@ -273,7 +271,6 @@ def sample_extended_params(rng: np.random.Generator, rand: ExtendedPlantRandomiz
             T_br_max=T_brake_max,
             p_br=float(rng.uniform(*rand.brake_p_range)),
             tau_br=float(rng.uniform(*rand.brake_tau_range)),
-            kappa_c=_log_uniform(*rand.brake_kappa_range),
             mu=float(rng.uniform(*rand.mu_range)),
         )
         wheel = WheelParams(
@@ -413,7 +410,6 @@ class CenteredRandomizationConfig:
     eta_gb: float = 0.9  # gearbox efficiency
     brake_tau: float = 0.08  # s - brake time constant
     brake_p: float = 1.2  # brake exponent
-    brake_kappa: float = 0.08  # brake slip constant
     mu: float = 0.9  # tire friction coefficient
     wheel_inertia: float = 1.5  # kg·m² - wheel + rotating assembly
     
@@ -468,7 +464,6 @@ class CenteredRandomizationConfig:
             eta_gb=fitted.eta_gb,
             brake_tau=fitted.brake_tau,
             brake_p=fitted.brake_p,
-            brake_kappa=fitted.brake_kappa,
             mu=fitted.mu,
             wheel_inertia=fitted.wheel_inertia,
             # Spread
@@ -603,12 +598,6 @@ class CenteredRandomizationConfig:
             enforce_positivity=True,  # Only enforce p > 0
         )
         
-        brake_kappa_range = _make_log_range(
-            self.brake_kappa,
-            brake_spread,
-            enforce_positivity=True,  # Only enforce kappa > 0
-        )
-        
         mu_range = _make_range(
             self.mu,
             brake_spread * 0.5,
@@ -651,7 +640,6 @@ class CenteredRandomizationConfig:
                 "brake_tau_range": list(brake_tau_range),
                 "brake_accel_range": list(brake_accel_range),
                 "brake_p_range": list(brake_p_range),
-                "brake_kappa_range": list(brake_kappa_range),
                 "mu_range": list(mu_range),
                 # Wheel
                 "wheel_radius_range": list(wheel_radius_range),
@@ -695,7 +683,6 @@ class CenteredRandomizationConfig:
             "eta_gb": self.eta_gb,
             "brake_tau": self.brake_tau,
             "brake_p": self.brake_p,
-            "brake_kappa": self.brake_kappa,
             "mu": self.mu,
             "wheel_inertia": self.wheel_inertia,
             # Spread
@@ -712,6 +699,7 @@ class CenteredRandomizationConfig:
     def from_dict(cls, d: Dict) -> "CenteredRandomizationConfig":
         """Create from dictionary."""
         d = dict(d)
+        d.pop("brake_kappa", None)
         d.setdefault("motor_min_current_A", 0.0)
         return cls(**d)
     

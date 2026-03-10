@@ -107,8 +107,6 @@ def parse_args() -> argparse.Namespace:
                         metavar=("MIN", "MAX"), help="Brake time constant in s")
     bounds.add_argument("--brake-p-bounds", type=float, nargs=2, default=[0.5, 3.0],
                         metavar=("MIN", "MAX"), help="Brake exponent")
-    bounds.add_argument("--brake-kappa-bounds", type=float, nargs=2, default=[0.01, 0.3],
-                        metavar=("MIN", "MAX"), help="Brake slip constant")
     bounds.add_argument("--mu-bounds", type=float, nargs=2, default=[0.5, 1.2],
                         metavar=("MIN", "MAX"), help="Tire friction coefficient")
     
@@ -133,7 +131,6 @@ def parse_args() -> argparse.Namespace:
     init.add_argument("--brake-tmax-init", type=float, default=None)
     init.add_argument("--brake-tau-init", type=float, default=None)
     init.add_argument("--brake-p-init", type=float, default=None)
-    init.add_argument("--brake-kappa-init", type=float, default=None)
     init.add_argument("--mu-init", type=float, default=None)
     init.add_argument("--wheel-radius-init", type=float, default=None)
     init.add_argument("--wheel-inertia-init", type=float, default=None)
@@ -187,7 +184,6 @@ def main() -> int:
         brake_T_max_bounds=tuple(args.brake_tmax_bounds),
         brake_tau_bounds=tuple(args.brake_tau_bounds),
         brake_p_bounds=tuple(args.brake_p_bounds),
-        brake_kappa_bounds=tuple(args.brake_kappa_bounds),
         mu_bounds=tuple(args.mu_bounds),
         wheel_radius_bounds=tuple(args.wheel_radius_bounds),
         wheel_inertia_bounds=tuple(args.wheel_inertia_bounds),
@@ -220,8 +216,6 @@ def main() -> int:
         config_kwargs["brake_tau_init"] = args.brake_tau_init
     if args.brake_p_init is not None:
         config_kwargs["brake_p_init"] = args.brake_p_init
-    if args.brake_kappa_init is not None:
-        config_kwargs["brake_kappa_init"] = args.brake_kappa_init
     if args.mu_init is not None:
         config_kwargs["mu_init"] = args.mu_init
     if args.wheel_radius_init is not None:
@@ -255,7 +249,6 @@ def main() -> int:
     print(f"  T_max:         {fitted.brake_T_max:.1f} Nm")
     print(f"  tau:           {fitted.brake_tau:.4f} s")
     print(f"  p:             {fitted.brake_p:.4f}")
-    print(f"  kappa:         {fitted.brake_kappa:.4f}")
     print(f"  mu:            {fitted.mu:.4f}")
     print("Wheel:")
     print(f"  radius:        {fitted.wheel_radius:.4f} m")

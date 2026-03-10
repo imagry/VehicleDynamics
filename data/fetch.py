@@ -28,9 +28,8 @@ DEFAULT_FILES: Sequence[str] = (
     "driving_mode.csv",
     "rear_left_wheel_speed.csv",
     "rear_right_wheel_speed.csv",
-    "throttle.csv",
-    "brake.csv",
     "imu.csv",
+    "cruise_control.csv",
 )
 
 
@@ -149,18 +148,31 @@ class TripFetcher:
             self.logger.info("Download size cap: %.2f GB", cfg.max_gb)
 
         downloaded_bytes = 0
+        downloaded_trips = 0
+        scanned_days = 0
+        discovered_trips = 0
+        skipped_car_mismatch = 0
+        skipped_vehicle_mismatch = 0
+        skipped_already_exists = 0
+        skipped_missing_required = 0
+
         for day in daterange(cfg.start, cfg.end):
+            scanned_days += 1
             for trip_prefix in self._list_trip_prefixes(day):
+                discovered_trips += 1
                 if not self._is_target_car(trip_prefix):
+                    skipped_car_mismatch += 1
                     continue
 
                 if cfg.vehicle_id and not self._has_vehicle_id(trip_prefix):
+                    skipped_vehicle_mismatch += 1
                     continue
 
                 trip_id = Path(trip_prefix.rstrip("/")).name
                 dest_dir = self.dest / trip_id
                 if dest_dir.exists() and not cfg.overwrite:
                     self.logger.info("Skip %s (already exists)", trip_id)
+                    skipped_already_exists += 1
                     continue
 
                 size = (
@@ -170,6 +182,7 @@ class TripFetcher:
                 )
                 if size is None:
                     self.logger.info("Skip %s (missing required files)", trip_id)
+                    skipped_missing_required += 1
                     continue
 
                 if self._cap_bytes and downloaded_bytes + size > self._cap_bytes:
@@ -183,11 +196,28 @@ class TripFetcher:
                 self._sync_trip(trip_prefix, dest_dir, cfg.files)
                 if not cfg.dry_run:
                     downloaded_bytes += size
+                    downloaded_trips += 1
 
         if cfg.dry_run:
             self.logger.info("Dry-run completed (no downloads performed)")
         else:
             self.logger.info("Finished downloading %.2f GB", downloaded_bytes / 1e9)
+
+        self.logger.info(
+            "Summary: days=%d discovered=%d downloaded=%d skipped(car=%d vehicle=%d exists=%d missing_files=%d)",
+            scanned_days,
+            discovered_trips,
+            downloaded_trips,
+            skipped_car_mismatch,
+            skipped_vehicle_mismatch,
+            skipped_already_exists,
+            skipped_missing_required,
+        )
+
+        if not cfg.dry_run and downloaded_trips == 0:
+            self.logger.warning(
+                "No trips downloaded. Check filters (date range / car / vehicle_id) and required files list."
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers

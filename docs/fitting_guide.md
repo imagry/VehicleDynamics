@@ -323,7 +323,7 @@ The parameter section displays all vehicle parameters organized by category. For
 - **Motor**: motor_V_max, motor_R, motor_K, motor_b, motor_J, motor_gamma_throttle, motor_throttle_tau, motor_min_current_A
 - **Motor Limits**: motor_T_max, motor_P_max
 - **Drivetrain**: gear_ratio, eta_gb
-- **Brake**: brake_T_max, brake_tau, brake_p, brake_kappa, mu
+- **Brake**: brake_T_max, brake_tau, brake_p, mu
 - **Wheel**: wheel_radius, wheel_inertia
 
 **Parameter Groups (Polynomial Motor Model):**
@@ -331,7 +331,7 @@ The parameter section displays all vehicle parameters organized by category. For
 - **Motor**: motor_V_max, motor_gamma_throttle, motor_throttle_tau, motor_min_current_A
 - **Polynomial Coefficients**: 10 coefficients (c_00, c_10, c_01, c_20, c_11, c_02, c_30, c_21, c_12, c_03)
 - **Drivetrain**: gear_ratio, eta_gb
-- **Brake**: brake_T_max, brake_tau, brake_p, brake_kappa, mu
+- **Brake**: brake_T_max, brake_tau, brake_p, mu
 - **Wheel**: wheel_radius, wheel_inertia
 
 **Note**: If min == max for a parameter, that parameter is fixed (not optimized) at that value.

@@ -8,6 +8,7 @@ A modular Python library for simulating vehicle longitudinal dynamics, fitting p
 - **Parameter Fitting**: Fit 18+ vehicle parameters from real trip data using trajectory optimization
 - **Interactive GUI**: User-friendly interface for parameter fitting and visualization
 - **Data Processing**: Tools for fetching and parsing trip data from S3 or local files
+- **Data GUIs**: Separate GUIs for trip fetching and trip parsing workflows
 - **Modular Design**: Clean separation between simulation, fitting, and data handling
 
 ## Quick Start
@@ -48,6 +49,16 @@ python scripts/fit_params.py \
 python examples/gui_usage.py
 ```
 
+### Data GUIs
+
+```bash
+# Fetch trips from S3 interactively
+python scripts/fetch_trips_gui.py
+
+# Parse raw trips into .pt datasets interactively
+python scripts/parse_trips_gui.py
+```
+
 ### Run Simulation
 
 ```bash
@@ -57,10 +68,20 @@ python scripts/simulate_trip.py \
     --output results.npz
 ```
 
+### Generate Feedforward Traces
+
+```bash
+python scripts/feedforward_trip.py \
+    --trip-data data/processed/vehicle/all_trips_data.pt \
+    --params fitted_params.json \
+    --output feedforward_traces.npz
+```
+
 ## Documentation
 
 - [Getting Started](docs/getting_started.md) - Installation and quick start
 - [Dynamics Model](docs/dynamics_model.md) - Physics equations and model details
+- [Inverse Model](docs/inverse_model.md) - Analytic feedforward inverse (target accel to action)
 - [Fitting Guide](docs/fitting_guide.md) - Parameter fitting workflow
 - [API Reference](docs/api_reference.md) - Complete API documentation
 
@@ -71,6 +92,7 @@ See the `examples/` directory for:
 - `fit_from_data.py` - Parameter fitting example
 - `gui_usage.py` - GUI usage example
 - `custom_vehicle.py` - Custom vehicle configurations
+- `inverse_feedforward.py` - Analytic inverse feedforward example
 
 ## Project Structure
 

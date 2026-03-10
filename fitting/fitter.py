@@ -138,7 +138,6 @@ class FittedVehicleParams:
     brake_T_max: float = 15000.0  # Nm - maximum brake torque at wheel
     brake_tau: float = 0.08  # s - brake time constant
     brake_p: float = 1.2  # brake exponent
-    brake_kappa: float = 0.08  # brake slip constant
     mu: float = 0.9  # tire friction coefficient
     
     # === WHEEL PARAMETERS ===
@@ -181,7 +180,6 @@ class FittedVehicleParams:
             "brake_T_max": 15000.0,
             "brake_tau": 0.08,
             "brake_p": 1.2,
-            "brake_kappa": 0.08,
             "mu": 0.9,
             "wheel_radius": 0.346,
             "wheel_inertia": 1.5,
@@ -245,7 +243,6 @@ class FittedVehicleParams:
                 "T_max": self.brake_T_max,
                 "tau": self.brake_tau,
                 "p": self.brake_p,
-                "kappa_c": self.brake_kappa,
                 "mu": self.mu,
             },
             "wheel": {
@@ -284,7 +281,6 @@ class FitterConfig:
     brake_T_max_init: float = 15000.0  # Nm
     brake_tau_init: float = 0.08  # s - brake time constant
     brake_p_init: float = 1.2  # brake exponent
-    brake_kappa_init: float = 0.08  # brake slip constant
     mu_init: float = 0.9  # tire friction coefficient
     wheel_radius_init: float = 0.346  # m
     wheel_inertia_init: float = 1.5  # kg·m²
@@ -308,7 +304,6 @@ class FitterConfig:
     brake_T_max_bounds: Tuple[float, float] = (10000.0, 20000.0)  # Nm
     brake_tau_bounds: Tuple[float, float] = (0.01, 0.5)  # s
     brake_p_bounds: Tuple[float, float] = (0.5, 3.0)  # exponent
-    brake_kappa_bounds: Tuple[float, float] = (0.01, 0.3)  # slip constant
     mu_bounds: Tuple[float, float] = (0.5, 1.2)  # friction coefficient
     wheel_radius_bounds: Tuple[float, float] = (0.315, 0.34)  # m
     wheel_inertia_bounds: Tuple[float, float] = (1.0, 2.0)  # kg·m²
@@ -317,6 +312,13 @@ class FitterConfig:
     speed_loss_weight: float = 1.0  # weight for velocity MSE
     accel_loss_weight: float = 0.0  # weight for instantaneous acceleration MSE
     brake_loss_boost: float = 0.0  # extra weight for samples with active brake
+    use_uniform_speed_accel_bin_loss: bool = False  # reweight samples so speed-accel bins contribute more uniformly
+    speed_accel_speed_bins: int = 20  # number of bins on speed axis
+    speed_accel_accel_bins: int = 20  # number of bins on acceleration axis
+    speed_accel_speed_range: Tuple[float, float] = (0.0, 25.0)  # fixed speed bounds for bucketization (m/s)
+    speed_accel_accel_range: Tuple[float, float] = (-4.0, 4.0)  # fixed acceleration bounds for bucketization (m/s^2)
+    speed_accel_bin_weight_cap: float = 10.0  # clamp for per-sample bucket weights (>0)
+    optimize_without_grade: bool = False  # if True, force road grade to 0 during optimization simulation
     mask_negative_gt_speed: bool = False  # ignore loss where GT speed is negative
     full_stop_loss_cap_fraction: float = 0.0  # cap full-stop segment loss as fraction of total (0=off)
     
@@ -451,6 +453,7 @@ class TripSegment:
     brake: np.ndarray         # brake input (0-100)
     grade: np.ndarray         # road grade (rad)
     dt: float                 # timestep (s)
+    sample_weights: Optional[np.ndarray] = None  # optional per-step loss weights
     
     @property
     def length(self) -> int:
@@ -489,7 +492,7 @@ class VehicleParamFitter:
                 "poly_c_00", "poly_c_10", "poly_c_01", "poly_c_20", "poly_c_11", "poly_c_02",
                 "poly_c_30", "poly_c_21", "poly_c_12", "poly_c_03",
                 "gear_ratio", "eta_gb",
-                "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+                "brake_T_max", "brake_tau", "brake_p", "mu",
                 "wheel_radius", "wheel_inertia",
                 "motor_min_current_A",
             ]
@@ -499,7 +502,7 @@ class VehicleParamFitter:
                 "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_gamma_throttle", "motor_throttle_tau",
                 "motor_T_max", "motor_P_max",
                 "gear_ratio", "eta_gb",
-                "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+                "brake_T_max", "brake_tau", "brake_p", "mu",
                 "wheel_radius", "wheel_inertia",
                 "motor_min_current_A",
             ]
@@ -517,7 +520,9 @@ class VehicleParamFitter:
         self._current_loss: float = 0.0
         self._bounds: Optional[List[Tuple[float, float]]] = None  # Store bounds for barrier computation
         self._trips: Optional[Dict[str, Dict[str, np.ndarray]]] = None
+        self._raw_metadata: Dict[str, object] = {}
         self._dt: Optional[float] = None
+        self._last_speed_accel_distribution: Optional[Dict[str, np.ndarray]] = None
         self._phase_advance_event = threading.Event()
         self.current_phase: Optional[str] = None
         self._extreme_actuator_seen: set[tuple[str, str]] = set()
@@ -550,7 +555,7 @@ class VehicleParamFitter:
         self._abort_event.set()
 
     def _get_phase_param_names(self, phase: str) -> List[str]:
-        brake_params = {"brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu"}
+        brake_params = {"brake_T_max", "brake_tau", "brake_p", "mu"}
         if phase == "brake":
             return [p for p in self.PARAM_NAMES if p in brake_params]
         if phase == "throttle":
@@ -607,6 +612,7 @@ class VehicleParamFitter:
                     brake=seg.brake[start:end],
                     grade=seg.grade[start:end],
                     dt=seg.dt,
+                    sample_weights=(seg.sample_weights[start:end].copy() if seg.sample_weights is not None else None),
                 )
                 filtered.append(sub)
                 idx += 1
@@ -857,6 +863,19 @@ class VehicleParamFitter:
         """
         raw = _load_torch_file_compat(data_path)
         trips = {}
+
+        metadata = raw.get("metadata", {}) if isinstance(raw, dict) else {}
+        self._raw_metadata = metadata if isinstance(metadata, dict) else {}
+
+        metadata_dt: Optional[float] = None
+        dt_raw = self._raw_metadata.get("dt")
+        if dt_raw is not None:
+            try:
+                dt_candidate = float(dt_raw)
+                if np.isfinite(dt_candidate) and dt_candidate > 0.0:
+                    metadata_dt = dt_candidate
+            except (TypeError, ValueError):
+                metadata_dt = None
         
         for key, value in raw.items():
             if key == "metadata":
@@ -910,9 +929,11 @@ class VehicleParamFitter:
                     "brake": brake,
                     "angle": np.asarray(value.get("angle", np.zeros_like(value["speed"])), dtype=np.float64),
                 }
-                # Try to get time or estimate dt
-                if raw_time is not None:
+                # Try to get time directly; if missing, synthesize from metadata dt.
+                if raw_time is not None and raw_time.size > 1:
                     trip_data["time"] = raw_time
+                elif metadata_dt is not None:
+                    trip_data["time"] = np.arange(len(trip_data["speed"]), dtype=np.float64) * metadata_dt
                 trips[key] = trip_data
             except KeyError as e:
                 LOGGER.warning(f"Trip {key} missing field {e}, skipping")
@@ -923,13 +944,41 @@ class VehicleParamFitter:
     
     def _estimate_dt(self, trips: Dict[str, Dict[str, np.ndarray]]) -> float:
         """Estimate timestep from trip data."""
+        metadata_dt: Optional[float] = None
+        if isinstance(self._raw_metadata, dict):
+            dt_raw = self._raw_metadata.get("dt")
+            if dt_raw is not None:
+                try:
+                    dt_candidate = float(dt_raw)
+                    if np.isfinite(dt_candidate) and dt_candidate > 0.0:
+                        metadata_dt = dt_candidate
+                except (TypeError, ValueError):
+                    metadata_dt = None
+
         dts = []
         for trip_id, data in trips.items():
             if "time" in data:
                 t = data["time"]
                 if len(t) > 1:
-                    dt_trip = np.median(np.diff(t))
-                    dts.append(dt_trip)
+                    diffs = np.diff(t)
+                    diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+                    if diffs.size > 0:
+                        dt_trip = float(np.median(diffs))
+                        dts.append(dt_trip)
+
+        if metadata_dt is not None and dts:
+            dt_from_time = float(np.median(dts))
+            rel_err = abs(dt_from_time - metadata_dt) / max(metadata_dt, 1e-12)
+            if rel_err > 0.2:
+                LOGGER.warning(
+                    "Time-derived dt %.6f differs from metadata dt %.6f; using metadata dt",
+                    dt_from_time,
+                    metadata_dt,
+                )
+            return metadata_dt
+
+        if metadata_dt is not None:
+            return metadata_dt
         
         if dts:
             return float(np.median(dts))
@@ -1120,12 +1169,14 @@ class VehicleParamFitter:
 
         if not segments:
             LOGGER.warning("No segments passed filters; falling back to raw trips")
+            raw_lengths: List[int] = []
             for trip_id, data in trips.items():
                 v = data["speed"]
                 a = data["acceleration"]
                 th = data["throttle"]
                 br = data["brake"]
                 grade = data["angle"]
+                raw_lengths.append(len(v))
                 if len(v) < cfg.min_segment_length:
                     continue
                 segments.append(TripSegment(
@@ -1138,8 +1189,149 @@ class VehicleParamFitter:
                     dt=dt,
                 ))
 
+            if not segments and raw_lengths:
+                max_len = max(raw_lengths)
+                relaxed_min = max(3, min(cfg.min_segment_length, max_len))
+                if max_len >= relaxed_min:
+                    LOGGER.warning(
+                        "All raw trips shorter than min_segment_length=%d (max=%d). "
+                        "Relaxing fallback minimum to %d samples.",
+                        cfg.min_segment_length,
+                        max_len,
+                        relaxed_min,
+                    )
+                    for trip_id, data in trips.items():
+                        v = np.asarray(data["speed"], dtype=np.float64)
+                        if len(v) < relaxed_min:
+                            continue
+                        segments.append(TripSegment(
+                            trip_id=f"{trip_id}_raw_relaxed",
+                            speed=v,
+                            acceleration=np.asarray(data["acceleration"], dtype=np.float64),
+                            throttle=np.asarray(data["throttle"], dtype=np.float64),
+                            brake=np.asarray(data["brake"], dtype=np.float64),
+                            grade=np.asarray(data["angle"], dtype=np.float64),
+                            dt=dt,
+                        ))
+
         LOGGER.info(f"Created {len(segments)} segments from {len(trips)} trips")
         return segments
+
+    def _build_equal_width_edges(self, values: np.ndarray, n_bins: int) -> np.ndarray:
+        """Build robust equal-width bin edges for 1D values."""
+        if values.size == 0:
+            return np.linspace(-1.0, 1.0, n_bins + 1, dtype=np.float64)
+
+        vmin = float(np.min(values))
+        vmax = float(np.max(values))
+        if not np.isfinite(vmin) or not np.isfinite(vmax):
+            return np.linspace(-1.0, 1.0, n_bins + 1, dtype=np.float64)
+
+        if abs(vmax - vmin) < 1e-12:
+            pad = max(abs(vmin) * 0.05, 1e-3)
+            vmin -= pad
+            vmax += pad
+
+        return np.linspace(vmin, vmax, n_bins + 1, dtype=np.float64)
+
+    def _bin_pair_indices(
+        self,
+        speed: np.ndarray,
+        accel: np.ndarray,
+        speed_edges: np.ndarray,
+        accel_edges: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Map speed/accel samples to 2D bin indices."""
+        speed_idx = np.digitize(speed, speed_edges, right=False) - 1
+        accel_idx = np.digitize(accel, accel_edges, right=False) - 1
+        speed_idx = np.clip(speed_idx, 0, len(speed_edges) - 2)
+        accel_idx = np.clip(accel_idx, 0, len(accel_edges) - 2)
+        return speed_idx.astype(np.int64), accel_idx.astype(np.int64)
+
+    def compute_speed_accel_distribution(
+        self,
+        segments: List[TripSegment],
+        speed_bins: Optional[int] = None,
+        accel_bins: Optional[int] = None,
+    ) -> Dict[str, np.ndarray]:
+        """Compute a 2D histogram over (speed, acceleration) for the provided segments."""
+        n_speed_bins = int(speed_bins if speed_bins is not None else self.config.speed_accel_speed_bins)
+        n_accel_bins = int(accel_bins if accel_bins is not None else self.config.speed_accel_accel_bins)
+        n_speed_bins = max(n_speed_bins, 2)
+        n_accel_bins = max(n_accel_bins, 2)
+
+        speed_min, speed_max = self.config.speed_accel_speed_range
+        accel_min, accel_max = self.config.speed_accel_accel_range
+        speed_edges = np.linspace(float(speed_min), float(speed_max), n_speed_bins + 1, dtype=np.float64)
+        accel_edges = np.linspace(float(accel_min), float(accel_max), n_accel_bins + 1, dtype=np.float64)
+
+        if not segments:
+            counts = np.zeros((n_speed_bins, n_accel_bins), dtype=np.int64)
+            return {
+                "speed_edges": speed_edges,
+                "accel_edges": accel_edges,
+                "counts": counts,
+                "total_samples": np.array([0], dtype=np.int64),
+                "nonzero_bins": np.array([0], dtype=np.int64),
+            }
+        all_speed = np.concatenate([seg.speed for seg in segments]).astype(np.float64)
+        all_accel = np.concatenate([seg.acceleration for seg in segments]).astype(np.float64)
+
+        counts = np.zeros((n_speed_bins, n_accel_bins), dtype=np.int64)
+        for seg in segments:
+            s_idx, a_idx = self._bin_pair_indices(seg.speed, seg.acceleration, speed_edges, accel_edges)
+            np.add.at(counts, (s_idx, a_idx), 1)
+
+        return {
+            "speed_edges": speed_edges,
+            "accel_edges": accel_edges,
+            "counts": counts,
+            "total_samples": np.array([all_speed.size], dtype=np.int64),
+            "nonzero_bins": np.array([int(np.count_nonzero(counts))], dtype=np.int64),
+        }
+
+    def _compute_uniform_weight_map(self, counts: np.ndarray) -> np.ndarray:
+        """Compute per-bin sample weights so non-empty bins contribute more uniformly."""
+        counts_f = counts.astype(np.float64)
+        total_samples = float(np.sum(counts_f))
+        nonzero = counts_f > 0.0
+        nonzero_bins = int(np.count_nonzero(nonzero))
+
+        weight_map = np.zeros_like(counts_f, dtype=np.float64)
+        if total_samples <= 0.0 or nonzero_bins == 0:
+            return weight_map
+
+        normalizer = total_samples / float(nonzero_bins)
+        weight_map[nonzero] = normalizer / counts_f[nonzero]
+
+        cap = float(self.config.speed_accel_bin_weight_cap)
+        if cap > 0.0:
+            weight_map[nonzero] = np.minimum(weight_map[nonzero], cap)
+
+        weighted_sum = float(np.sum(weight_map * counts_f))
+        if weighted_sum > 0.0:
+            mean_weight = weighted_sum / total_samples
+            weight_map[nonzero] /= mean_weight
+
+        return weight_map
+
+    def apply_uniform_speed_accel_bucket_weights(
+        self,
+        segments: List[TripSegment],
+    ) -> Dict[str, np.ndarray]:
+        """Assign per-step weights based on (speed, acceleration) bucket occupancy."""
+        distribution = self.compute_speed_accel_distribution(segments)
+        speed_edges = distribution["speed_edges"]
+        accel_edges = distribution["accel_edges"]
+        counts = distribution["counts"]
+        weight_map = self._compute_uniform_weight_map(counts)
+
+        for seg in segments:
+            s_idx, a_idx = self._bin_pair_indices(seg.speed, seg.acceleration, speed_edges, accel_edges)
+            seg.sample_weights = weight_map[s_idx, a_idx].astype(np.float64)
+
+        distribution["weight_map"] = weight_map
+        return distribution
 
     def get_longest_validation_display_segment(self) -> Optional[TripSegment]:
         """Return the longest validation segment without max-length splitting.
@@ -1379,6 +1571,7 @@ class VehicleParamFitter:
                 brake=segment.brake[indices].copy(),
                 grade=segment.grade[indices].copy(),
                 dt=segment.dt * factor,  # Update dt to reflect new sampling rate
+                sample_weights=(segment.sample_weights[indices].copy() if segment.sample_weights is not None else None),
             ))
         
         LOGGER.info(f"Downsampled {len(segments)} segments to {len(downsampled)} segments (factor={factor})")
@@ -1475,6 +1668,7 @@ class VehicleParamFitter:
                 brake=seg.brake[start:end].copy(),
                 grade=seg.grade[start:end].copy(),
                 dt=seg.dt,
+                sample_weights=(seg.sample_weights[start:end].copy() if seg.sample_weights is not None else None),
             ))
         return batch
     
@@ -1654,13 +1848,13 @@ class VehicleParamFitter:
         floor concept as the ExtendedPlant via `motor_min_current_A`.
         """
         if self.config.motor_model_type == "polynomial":
-            # Polynomial model: 26 parameters
+            # Polynomial model: 25 parameters
             (mass, drag_area, rolling_coeff,
              V_max, gamma_throttle, throttle_tau,
              poly_c_00, poly_c_10, poly_c_01, poly_c_20, poly_c_11, poly_c_02,
              poly_c_30, poly_c_21, poly_c_12, poly_c_03,
              gear_ratio, eta,
-             brake_T_max, brake_tau, brake_p, brake_kappa, mu,
+             brake_T_max, brake_tau, brake_p, mu,
              r_w, wheel_inertia,
              *_) = params
             
@@ -1687,11 +1881,11 @@ class VehicleParamFitter:
             # For polynomial model, use default motor inertia (not fitted)
             J = 1e-3  # Default motor rotor inertia (kg·m²)
         else:
-            # DC motor model: 22 parameters
+            # DC motor model: 21 parameters
             (mass, drag_area, rolling_coeff,
              V_max, R, K, b, J, gamma_throttle, throttle_tau, T_max, P_max,
              gear_ratio, eta,
-             brake_T_max, brake_tau, brake_p, brake_kappa, mu,
+             brake_T_max, brake_tau, brake_p, mu,
              r_w, wheel_inertia,
              *tail) = params
 
@@ -1723,16 +1917,17 @@ class VehicleParamFitter:
         # Drive force
         F_drive = wheel_torque / max(r_w, 1e-3)
         
-        # Brake force with nonlinear characteristic + kappa shaping
+        # Brake force with nonlinear power-law response
         brake_cmd = max(brake, 0.0) / 100.0
         brake_p_eff = max(brake_p, 0.1)
-        denom = 1.0 + brake_kappa * (1.0 - brake_cmd)
-        denom = max(denom, 1e-6)
-        brake_frac = (brake_cmd ** brake_p_eff) / denom
+        brake_frac = brake_cmd ** brake_p_eff
         F_brake = brake_T_max * brake_frac / max(r_w, 1e-3)
         
         # Aerodynamic drag
         F_drag = 0.5 * AIR_DENSITY * drag_area * speed * abs(speed)
+
+        if self.config.optimize_without_grade:
+            grade = 0.0
         
         # Rolling resistance
         cos_grade = np.cos(grade)
@@ -1795,7 +1990,7 @@ class VehicleParamFitter:
                 v_sim[t],
                 throttle_state,
                 segment.brake[t],
-                segment.grade[t],
+                0.0 if self.config.optimize_without_grade else segment.grade[t],
             )
             a_sim[t] = a
             # Euler integration with speed clamp (no negative speeds)
@@ -1813,122 +2008,22 @@ class VehicleParamFitter:
         return v_sim, a_sim
 
     def _build_extended_plant_params(self, params: np.ndarray) -> ExtendedPlantParams:
-        """Create ExtendedPlantParams from fitted parameter array (DC model)."""
-        cfg = self.config
+        """Create ExtendedPlantParams from current DC fitted parameter array."""
         values = np.asarray(params, dtype=np.float64).flatten()
-
-        names_new_22 = [
+        expected_names = [
             "mass", "drag_area", "rolling_coeff",
             "V_max", "R", "K", "b", "J", "gamma_throttle", "throttle_tau", "T_max", "P_max",
             "gear_ratio", "eta",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
+            "brake_T_max", "brake_tau", "brake_p", "mu",
             "r_w", "wheel_inertia",
             "motor_min_current_A",
         ]
-        names_old_24 = [
-            "mass", "drag_area", "rolling_coeff",
-            "V_max", "R", "K", "b", "J", "gamma_throttle", "throttle_tau", "T_max", "P_max",
-            "gear_ratio", "eta",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
-            "r_w", "wheel_inertia",
-            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
-        ]
-        names_old_23 = [
-            "mass", "drag_area", "rolling_coeff",
-            "V_max", "R", "K", "b", "J", "gamma_throttle", "T_max", "P_max",
-            "gear_ratio", "eta",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
-            "r_w", "wheel_inertia",
-            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
-        ]
-        names_old_22 = [
-            "mass", "drag_area", "rolling_coeff",
-            "V_max", "R", "K", "b", "J", "T_max", "P_max",
-            "gear_ratio", "eta",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
-            "r_w", "wheel_inertia",
-            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
-        ]
-        names_old_21 = [
-            "mass", "drag_area", "rolling_coeff",
-            "V_max", "R", "K", "b", "J",
-            "gear_ratio", "eta",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
-            "r_w", "wheel_inertia",
-            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
-        ]
-        names_old_19 = [
-            "mass", "drag_area", "rolling_coeff",
-            "V_max", "R", "K", "b", "J", "T_max", "P_max",
-            "gear_ratio", "eta",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
-            "r_w", "wheel_inertia",
-        ]
-
-        if len(values) >= 24:
-            active_names = names_old_24
-            values = values[:24]
-        elif len(values) == 23:
-            active_names = names_old_23
-        elif len(values) == 22:
-            gr_lo, gr_hi = cfg.gear_ratio_bounds
-            br_lo, br_hi = cfg.brake_T_max_bounds
-            t_lo, t_hi = cfg.motor_T_max_bounds
-            p_lo, p_hi = cfg.motor_P_max_bounds
-
-            new_signature = (gr_lo <= values[12] <= gr_hi) and (br_lo <= values[14] <= br_hi)
-            old_signature = (gr_lo <= values[10] <= gr_hi) and (br_lo <= values[12] <= br_hi)
-
-            if new_signature and not old_signature:
-                active_names = names_new_22
-            elif old_signature and not new_signature:
-                active_names = names_old_22
-            else:
-                gamma_lo, gamma_hi = cfg.motor_gamma_throttle_bounds
-                tau_lo, tau_hi = cfg.motor_throttle_tau_bounds
-                looks_new = (
-                    gamma_lo <= values[8] <= gamma_hi
-                    and tau_lo <= values[9] <= tau_hi
-                    and t_lo <= values[10] <= t_hi
-                    and p_lo <= values[11] <= p_hi
-                )
-                active_names = names_new_22 if looks_new else names_old_22
-        elif len(values) == 21:
-            active_names = names_old_21
-        elif len(values) == 19:
-            active_names = names_old_19
-        else:
-            raise ValueError(f"Unsupported DC parameter length for ExtendedPlant build: {len(values)}")
-
-        param_map = {
-            "mass": cfg.mass_init,
-            "drag_area": cfg.drag_area_init,
-            "rolling_coeff": cfg.rolling_coeff_init,
-            "V_max": cfg.motor_V_max_init,
-            "R": cfg.motor_R_init,
-            "K": cfg.motor_K_init,
-            "b": cfg.motor_b_init,
-            "J": cfg.motor_J_init,
-            "gamma_throttle": cfg.motor_gamma_throttle_init,
-            "throttle_tau": cfg.motor_throttle_tau_init,
-            "T_max": cfg.motor_T_max_init if cfg.motor_T_max_init is not None else (cfg.motor_K_init * (cfg.motor_V_max_init / max(cfg.motor_R_init, 1e-4))),
-            "P_max": cfg.motor_P_max_init if cfg.motor_P_max_init is not None else 0.0,
-            "gear_ratio": cfg.gear_ratio_init,
-            "eta": cfg.eta_gb_init,
-            "brake_T_max": cfg.brake_T_max_init,
-            "brake_tau": cfg.brake_tau_init,
-            "brake_p": cfg.brake_p_init,
-            "brake_kappa": cfg.brake_kappa_init,
-            "mu": cfg.mu_init,
-            "r_w": cfg.wheel_radius_init,
-            "wheel_inertia": cfg.wheel_inertia_init,
-            "motor_min_current_A": cfg.motor_min_current_A_init,
-        }
-
-        for name, value in zip(active_names, values):
-            if name.startswith("creep_"):
-                continue
-            param_map[name] = float(value)
+        if values.size != len(expected_names):
+            raise ValueError(
+                f"Unsupported DC parameter length for ExtendedPlant build: {values.size}. "
+                f"Expected {len(expected_names)} parameters."
+            )
+        param_map = {name: float(value) for name, value in zip(expected_names, values)}
 
         mass = param_map["mass"]
         drag_area = param_map["drag_area"]
@@ -1947,7 +2042,6 @@ class VehicleParamFitter:
         brake_T_max = param_map["brake_T_max"]
         brake_tau = param_map["brake_tau"]
         brake_p = param_map["brake_p"]
-        brake_kappa = param_map["brake_kappa"]
         mu = param_map["mu"]
         r_w = param_map["r_w"]
         wheel_inertia = param_map["wheel_inertia"]
@@ -1977,7 +2071,6 @@ class VehicleParamFitter:
             T_br_max=brake_T_max,
             p_br=brake_p,
             tau_br=brake_tau_val,
-            kappa_c=brake_kappa,
             mu=mu,
         )
 
@@ -2027,7 +2120,7 @@ class VehicleParamFitter:
                 action = throttle
 
             action = float(np.clip(action, -1.0, 1.0))
-            grade = float(segment.grade[t])
+            grade = 0.0 if self.config.optimize_without_grade else float(segment.grade[t])
             state = plant.step(action, segment.dt, substeps=substeps, grade_rad=grade)
             v_sim[t + 1] = state.speed
             a_sim[t] = state.acceleration
@@ -2064,7 +2157,7 @@ class VehicleParamFitter:
             Acceleration tensor [batch_size] or scalar
         """
         if self.config.motor_model_type == "polynomial":
-            # Polynomial model: 28 parameters
+            # Polynomial model: 25 parameters
             mass = params[..., 0]
             drag_area = params[..., 1]
             rolling_coeff = params[..., 2]
@@ -2077,10 +2170,9 @@ class VehicleParamFitter:
             brake_T_max = params[..., 18]
             brake_tau = params[..., 19]
             brake_p = params[..., 20]
-            brake_kappa = params[..., 21]
-            mu = params[..., 22]
-            r_w = params[..., 23]
-            wheel_inertia = params[..., 24]
+            mu = params[..., 21]
+            r_w = params[..., 22]
+            wheel_inertia = params[..., 23]
             
             # Motor speed from wheel speed
             omega_m = gear_ratio * speed / torch.clamp(r_w, min=1e-3)
@@ -2117,7 +2209,7 @@ class VehicleParamFitter:
             # Default motor inertia for polynomial model
             J = torch.full_like(mass, 1e-3)
         else:
-            # DC motor model: 24 parameters
+            # DC motor model: 21 parameters
             mass = params[..., 0]
             drag_area = params[..., 1]
             rolling_coeff = params[..., 2]
@@ -2135,10 +2227,9 @@ class VehicleParamFitter:
             brake_T_max = params[..., 14]
             brake_tau = params[..., 15]
             brake_p = params[..., 16]
-            brake_kappa = params[..., 17]
-            mu = params[..., 18]
-            r_w = params[..., 19]
-            wheel_inertia = params[..., 20]
+            mu = params[..., 17]
+            r_w = params[..., 18]
+            wheel_inertia = params[..., 19]
             
             # Motor speed from wheel speed
             omega_m = gear_ratio * speed / torch.clamp(r_w, min=1e-3)
@@ -2172,16 +2263,17 @@ class VehicleParamFitter:
         # Drive force
         F_drive = wheel_torque / torch.clamp(r_w, min=1e-3)
         
-        # Brake force with nonlinear characteristic + kappa shaping
+        # Brake force with nonlinear power-law response
         brake_cmd = torch.clamp(brake, min=0.0) / 100.0
         brake_p_eff = torch.clamp(brake_p, min=0.1)
-        denom = 1.0 + brake_kappa * (1.0 - brake_cmd)
-        denom = torch.clamp(denom, min=1e-6)
-        brake_frac = torch.pow(brake_cmd, brake_p_eff) / denom
+        brake_frac = torch.pow(brake_cmd, brake_p_eff)
         F_brake = brake_T_max * brake_frac / torch.clamp(r_w, min=1e-3)
         
         # Aerodynamic drag
         F_drag = 0.5 * AIR_DENSITY * drag_area * speed * torch.abs(speed)
+
+        if self.config.optimize_without_grade:
+            grade = torch.zeros_like(grade)
         
         # Rolling resistance
         cos_grade = torch.cos(grade)
@@ -2202,7 +2294,7 @@ class VehicleParamFitter:
         self,
         params: torch.Tensor,
         segments: List[TripSegment],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Simulate multiple segments in parallel on GPU.
         
         Args:
@@ -2213,6 +2305,7 @@ class VehicleParamFitter:
             v_sim: Simulated velocities tensor [n_segments, max_length]
             a_sim: Simulated accelerations tensor [n_segments, max_length]
             valid_mask: Valid mask tensor [n_segments, max_length] (1 where valid, 0 where padded)
+            sample_weights: Per-sample weights tensor [n_segments, max_length]
         """
         if not TORCH_AVAILABLE:
             raise RuntimeError("PyTorch not available")
@@ -2224,6 +2317,7 @@ class VehicleParamFitter:
         throttles_list = []
         brakes_list = []
         grades_list = []
+        weight_list = []
         initial_speeds_list = []
         valid_mask_list = []
         
@@ -2231,7 +2325,14 @@ class VehicleParamFitter:
             length = seg.length
             throttles_list.append(torch.tensor(seg.throttle, device=self._device, dtype=torch.float32))
             brakes_list.append(torch.tensor(seg.brake, device=self._device, dtype=torch.float32))
-            grades_list.append(torch.tensor(seg.grade, device=self._device, dtype=torch.float32))
+            if self.config.optimize_without_grade:
+                grades_list.append(torch.zeros(length, device=self._device, dtype=torch.float32))
+            else:
+                grades_list.append(torch.tensor(seg.grade, device=self._device, dtype=torch.float32))
+            if seg.sample_weights is not None:
+                weight_list.append(torch.tensor(seg.sample_weights, device=self._device, dtype=torch.float32))
+            else:
+                weight_list.append(torch.ones(length, device=self._device, dtype=torch.float32))
             initial_speeds_list.append(seg.initial_speed)
             
             # Create valid mask
@@ -2251,6 +2352,10 @@ class VehicleParamFitter:
         grades = torch.stack([
             torch.nn.functional.pad(g, (0, max_length - g.shape[0]), value=0.0)
             for g in grades_list
+        ])
+        sample_weights = torch.stack([
+            torch.nn.functional.pad(w, (0, max_length - w.shape[0]), value=1.0)
+            for w in weight_list
         ])
         valid_mask = torch.stack(valid_mask_list)
         
@@ -2295,7 +2400,7 @@ class VehicleParamFitter:
             # Euler integration with speed clamp
             v_sim[:, t + 1] = torch.clamp(v_curr + a * dt_tensor, min=0.0)
         
-        return v_sim, a_sim, valid_mask
+        return v_sim, a_sim, valid_mask, sample_weights
     
     def _trajectory_loss(
         self,
@@ -2325,7 +2430,7 @@ class VehicleParamFitter:
             params_torch = torch.tensor(params, device=self._device, dtype=torch.float32)
             
             # Simulate all segments in parallel on GPU
-            v_sim_batch, a_sim_batch, valid_mask = self._simulate_segments_batch_torch(params_torch, segments)
+            v_sim_batch, a_sim_batch, valid_mask, sample_weights = self._simulate_segments_batch_torch(params_torch, segments)
             
             # Compute GT tensors
             speeds_gt_list = []
@@ -2364,7 +2469,7 @@ class VehicleParamFitter:
             weighted_errors = (
                 cfg.speed_loss_weight * speed_errors +
                 cfg.accel_loss_weight * accel_errors
-            ) * valid_mask
+            ) * valid_mask * sample_weights
 
             if cfg.mask_negative_gt_speed:
                 gt_mask = (speeds_gt >= 0.0).float()
@@ -2378,7 +2483,7 @@ class VehicleParamFitter:
 
             # Sum over all segments and timesteps
             total_loss = torch.sum(weighted_errors).item()
-            total_samples = torch.sum(valid_mask).item()
+            total_samples = torch.sum(valid_mask * sample_weights).item()
 
             if cfg.full_stop_loss_cap_fraction > 0.0 and total_loss > 0.0:
                 eps = cfg.zero_speed_eps
@@ -2396,7 +2501,7 @@ class VehicleParamFitter:
         else:
             # CPU fallback
             total_loss = 0.0
-            total_samples = 0
+            total_samples = 0.0
             full_stop_loss = 0.0
             
             debug_progress = False
@@ -2418,12 +2523,14 @@ class VehicleParamFitter:
                 se_accel = (a_sim - segment.acceleration) ** 2
                 
                 weighted_se = cfg.speed_loss_weight * se_speed + cfg.accel_loss_weight * se_accel
+                sample_weights = segment.sample_weights if segment.sample_weights is not None else np.ones(segment.length, dtype=np.float64)
                 if cfg.mask_negative_gt_speed:
                     gt_mask = segment.speed >= 0.0
                     weighted_se = weighted_se * gt_mask
-                    total_samples += int(np.sum(gt_mask))
+                    total_samples += float(np.sum(sample_weights * gt_mask))
                 else:
-                    total_samples += segment.length
+                    total_samples += float(np.sum(sample_weights))
+                weighted_se = weighted_se * sample_weights
                 if cfg.brake_loss_boost > 0.0:
                     brake_active = segment.brake > cfg.brake_deadband_pct
                     weight = 1.0 + cfg.brake_loss_boost * brake_active
@@ -2771,6 +2878,23 @@ class VehicleParamFitter:
                 max_fraction=cfg.max_zero_speed_fraction,
                 eps=cfg.zero_speed_eps,
             )
+
+        if cfg.use_uniform_speed_accel_bin_loss:
+            if verbose:
+                print(
+                    "Applying uniform (speed, accel) bucket weighting "
+                    f"[{cfg.speed_accel_speed_bins}x{cfg.speed_accel_accel_bins}]..."
+                )
+            distribution = self.apply_uniform_speed_accel_bucket_weights(all_segments)
+            self._last_speed_accel_distribution = distribution
+            if verbose:
+                nonzero = int(distribution["nonzero_bins"][0])
+                total = int(distribution["total_samples"][0])
+                print(f"Weighted distribution bins (non-empty): {nonzero}, samples: {total:,}")
+        else:
+            for seg in all_segments:
+                seg.sample_weights = None
+            self._last_speed_accel_distribution = self.compute_speed_accel_distribution(all_segments)
         
         # Split into train/validation
         if self._split_seed is not None:
@@ -2822,7 +2946,7 @@ class VehicleParamFitter:
         
         # Initial parameters and bounds (variable count based on motor model)
         if cfg.motor_model_type == "polynomial":
-            # Polynomial model: 26 parameters
+            # Polynomial model: 25 parameters
             x0 = np.array([
                 cfg.mass_init,
                 cfg.drag_area_init,
@@ -2845,7 +2969,6 @@ class VehicleParamFitter:
                 cfg.brake_T_max_init,
                 cfg.brake_tau_init,
                 cfg.brake_p_init,
-                cfg.brake_kappa_init,
                 cfg.mu_init,
                 cfg.wheel_radius_init,
                 cfg.wheel_inertia_init,
@@ -2874,14 +2997,13 @@ class VehicleParamFitter:
                 cfg.brake_T_max_bounds,
                 cfg.brake_tau_bounds,
                 cfg.brake_p_bounds,
-                cfg.brake_kappa_bounds,
                 cfg.mu_bounds,
                 cfg.wheel_radius_bounds,
                 cfg.wheel_inertia_bounds,
                 cfg.motor_min_current_A_bounds,
             ]
         else:
-            # DC motor model: 22 parameters
+            # DC motor model: 21 parameters
             x0 = np.array([
                 cfg.mass_init,
                 cfg.drag_area_init,
@@ -2900,7 +3022,6 @@ class VehicleParamFitter:
                 cfg.brake_T_max_init,
                 cfg.brake_tau_init,
                 cfg.brake_p_init,
-                cfg.brake_kappa_init,
                 cfg.mu_init,
                 cfg.wheel_radius_init,
                 cfg.wheel_inertia_init,
@@ -2925,7 +3046,6 @@ class VehicleParamFitter:
                 cfg.brake_T_max_bounds,
                 cfg.brake_tau_bounds,
                 cfg.brake_p_bounds,
-                cfg.brake_kappa_bounds,
                 cfg.mu_bounds,
                 cfg.wheel_radius_bounds,
                 cfg.wheel_inertia_bounds,
@@ -3412,7 +3532,6 @@ class VehicleParamFitter:
                 brake_T_max=by_name["brake_T_max"],
                 brake_tau=by_name["brake_tau"],
                 brake_p=by_name["brake_p"],
-                brake_kappa=by_name["brake_kappa"],
                 mu=by_name["mu"],
                 wheel_radius=by_name["wheel_radius"],
                 wheel_inertia=by_name["wheel_inertia"],
@@ -3452,58 +3571,9 @@ class VehicleParamFitter:
         """Expand partial parameter vectors to full DC parameter set."""
         cfg = self.config
         params = np.asarray(params, dtype=np.float64).flatten()
-
-        names_new_22 = [
-            "mass", "drag_area", "rolling_coeff",
-            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_gamma_throttle", "motor_throttle_tau",
-            "motor_T_max", "motor_P_max",
-            "gear_ratio", "eta_gb",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
-            "wheel_radius", "wheel_inertia",
-            "motor_min_current_A",
-        ]
-        names_old_24 = [
-            "mass", "drag_area", "rolling_coeff",
-            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_gamma_throttle", "motor_throttle_tau",
-            "motor_T_max", "motor_P_max",
-            "gear_ratio", "eta_gb",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
-            "wheel_radius", "wheel_inertia",
-            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
-        ]
-        names_old_23 = [
-            "mass", "drag_area", "rolling_coeff",
-            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_gamma_throttle",
-            "motor_T_max", "motor_P_max",
-            "gear_ratio", "eta_gb",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
-            "wheel_radius", "wheel_inertia",
-            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
-        ]
-        names_old_22 = [
-            "mass", "drag_area", "rolling_coeff",
-            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J",
-            "motor_T_max", "motor_P_max",
-            "gear_ratio", "eta_gb",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
-            "wheel_radius", "wheel_inertia",
-            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
-        ]
-        names_old_21 = [
-            "mass", "drag_area", "rolling_coeff",
-            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J",
-            "gear_ratio", "eta_gb",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
-            "wheel_radius", "wheel_inertia",
-            "creep_a_max", "creep_v_cutoff", "creep_v_hold",
-        ]
-        names_old_19 = [
-            "mass", "drag_area", "rolling_coeff",
-            "motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_T_max", "motor_P_max",
-            "gear_ratio", "eta_gb",
-            "brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu",
-            "wheel_radius", "wheel_inertia",
-        ]
+        expected_size = 21
+        if params.size == expected_size:
+            return params.astype(np.float64, copy=False)
 
         defaults = {
             "mass": cfg.mass_init,
@@ -3523,50 +3593,13 @@ class VehicleParamFitter:
             "brake_T_max": cfg.brake_T_max_init,
             "brake_tau": cfg.brake_tau_init,
             "brake_p": cfg.brake_p_init,
-            "brake_kappa": cfg.brake_kappa_init,
             "mu": cfg.mu_init,
             "wheel_radius": cfg.wheel_radius_init,
             "wheel_inertia": cfg.wheel_inertia_init,
             "motor_min_current_A": cfg.motor_min_current_A_init,
         }
 
-        if params.size >= 24:
-            active_names = names_old_24
-            active_vals = params[:24]
-        elif params.size == 23:
-            active_names = names_old_23
-            active_vals = params
-        elif params.size == 22:
-            gr_lo, gr_hi = cfg.gear_ratio_bounds
-            br_lo, br_hi = cfg.brake_T_max_bounds
-            t_lo, t_hi = cfg.motor_T_max_bounds
-            p_lo, p_hi = cfg.motor_P_max_bounds
-
-            new_signature = (gr_lo <= params[12] <= gr_hi) and (br_lo <= params[14] <= br_hi)
-            old_signature = (gr_lo <= params[10] <= gr_hi) and (br_lo <= params[12] <= br_hi)
-
-            if new_signature and not old_signature:
-                active_names = names_new_22
-            elif old_signature and not new_signature:
-                active_names = names_old_22
-            else:
-                gamma_lo, gamma_hi = cfg.motor_gamma_throttle_bounds
-                tau_lo, tau_hi = cfg.motor_throttle_tau_bounds
-                looks_new = (
-                    gamma_lo <= params[8] <= gamma_hi
-                    and tau_lo <= params[9] <= tau_hi
-                    and t_lo <= params[10] <= t_hi
-                    and p_lo <= params[11] <= p_hi
-                )
-                active_names = names_new_22 if looks_new else names_old_22
-            active_vals = params
-        elif params.size == 21:
-            active_names = names_old_21
-            active_vals = params
-        elif params.size == 19:
-            active_names = names_old_19
-            active_vals = params
-        elif params.size == 8:
+        if params.size == 8:
             (
                 defaults["mass"],
                 defaults["drag_area"],
@@ -3577,40 +3610,34 @@ class VehicleParamFitter:
                 defaults["gear_ratio"],
                 defaults["brake_T_max"],
             ) = params
-            active_names = []
-            active_vals = np.array([], dtype=np.float64)
-        else:
-            raise ValueError(f"Unsupported parameter length for prediction: {params.size}")
+            return np.array([
+                defaults["mass"],
+                defaults["drag_area"],
+                defaults["rolling_coeff"],
+                defaults["motor_V_max"],
+                defaults["motor_R"],
+                defaults["motor_K"],
+                defaults["motor_b"],
+                defaults["motor_J"],
+                defaults["motor_gamma_throttle"],
+                defaults["motor_throttle_tau"],
+                defaults["motor_T_max"],
+                defaults["motor_P_max"],
+                defaults["gear_ratio"],
+                defaults["eta_gb"],
+                defaults["brake_T_max"],
+                defaults["brake_tau"],
+                defaults["brake_p"],
+                defaults["mu"],
+                defaults["wheel_radius"],
+                defaults["wheel_inertia"],
+                defaults["motor_min_current_A"],
+            ], dtype=np.float64)
 
-        for name, val in zip(active_names, active_vals):
-            if name.startswith("creep_"):
-                continue
-            defaults[name] = float(val)
-
-        return np.array([
-            defaults["mass"],
-            defaults["drag_area"],
-            defaults["rolling_coeff"],
-            defaults["motor_V_max"],
-            defaults["motor_R"],
-            defaults["motor_K"],
-            defaults["motor_b"],
-            defaults["motor_J"],
-            defaults["motor_gamma_throttle"],
-            defaults["motor_throttle_tau"],
-            defaults["motor_T_max"],
-            defaults["motor_P_max"],
-            defaults["gear_ratio"],
-            defaults["eta_gb"],
-            defaults["brake_T_max"],
-            defaults["brake_tau"],
-            defaults["brake_p"],
-            defaults["brake_kappa"],
-            defaults["mu"],
-            defaults["wheel_radius"],
-            defaults["wheel_inertia"],
-            defaults["motor_min_current_A"],
-        ], dtype=np.float64)
+        raise ValueError(
+            f"Unsupported parameter length for prediction: {params.size}. "
+            f"Expected {expected_size} parameters."
+        )
 
     def _predict_acceleration(
         self,
@@ -3667,7 +3694,6 @@ class VehicleParamFitter:
             params.brake_T_max,
             params.brake_tau,
             params.brake_p,
-            params.brake_kappa,
             params.mu,
             params.wheel_radius,
             params.wheel_inertia,
@@ -3722,7 +3748,6 @@ class VehicleParamFitter:
             params.brake_T_max,
             params.brake_tau,
             params.brake_p,
-            params.brake_kappa,
             params.mu,
             params.wheel_radius,
             params.wheel_inertia,
@@ -3806,7 +3831,7 @@ class VehicleParamFitter:
             params.motor_P_max if params.motor_P_max is not None else 0.0,
             params.gear_ratio, params.eta_gb,
             params.brake_T_max, params.brake_tau, params.brake_p,
-            params.brake_kappa, params.mu,
+            params.mu,
             params.wheel_radius, params.wheel_inertia,
             params.motor_min_current_A,
         ])

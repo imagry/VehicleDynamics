@@ -1,5 +1,5 @@
 {
-  "dataset": "No datasets found",
+  "dataset": "data\\processed\\NiroEV\\unknown_vehicle\\all_trips_data.pt",
   "motor_model": "dc",
   "use_barrier": false,
   "barrier_mu": "0.01",
@@ -15,7 +15,7 @@
   "epochs": "10",
   "random_batch": true,
   "random_batches_per_epoch": "100",
-  "random_batch_max_iter": "1",
+  "random_batch_max_iter": "4",
   "random_segment_length": "1000",
   "validation_fraction": "0.1",
   "validation_seed": "0",
@@ -23,16 +23,21 @@
   "fixed_length_val": true,
   "debug_batch_progress": false,
   "debug_batch_progress_step": "10",
-  "speed_weight": "0.2",
-  "accel_weight": "1.0",
+  "speed_weight": "1",
+  "accel_weight": "0",
   "brake_loss_boost": "0.0",
-  "full_stop_loss_cap": "0.025",
+  "full_stop_loss_cap": "0.0",
   "mask_negative_speed": true,
   "use_extended_plant": true,
+  "optimize_without_grade": false,
+  "use_uniform_speed_accel_bin_loss": true,
+  "speed_accel_speed_bins": "100",
+  "speed_accel_accel_bins": "100",
+  "speed_accel_bin_weight_cap": "10.0",
   "plant_substeps": "1",
   "actuator_smoothing": "0.0",
   "actuator_deadband": "0.0",
-  "max_accel": "6.0",
+  "max_accel": "100",
   "use_param_scaling": true,
   "optimization_mode": "joint",
   "phase_order": "throttle -> brake",
@@ -42,112 +47,107 @@
   "example_segment_index": "0",
   "parameters": {
     "mass": {
-      "init": "1943.083300",
+      "init": "2183.739401",
       "min": "1800.0",
       "max": "2300.0"
     },
     "drag_area": {
-      "init": "0.668085",
+      "init": "0.949763",
       "min": "0.4",
       "max": "1.2"
     },
     "rolling_coeff": {
-      "init": "0.009295",
+      "init": "0.014395",
       "min": "0.006",
       "max": "0.02"
     },
     "motor_V_max": {
-      "init": "341.440155",
+      "init": "332.344376",
       "min": "320.0",
       "max": "400.0"
     },
     "motor_R": {
-      "init": "0.224991",
+      "init": "0.020000",
       "min": "0.02",
       "max": "0.5"
     },
     "motor_K": {
-      "init": "0.430140",
+      "init": "0.226484",
       "min": "0.05",
       "max": "0.5"
     },
     "motor_b": {
-      "init": "0.030940",
+      "init": "0.076916",
       "min": "1e-06",
       "max": "0.1"
     },
     "motor_J": {
-      "init": "0.090565",
+      "init": "0.099692",
       "min": "0.01",
       "max": "0.1"
     },
     "motor_gamma_throttle": {
-      "init": "0.738296",
+      "init": "0.630193",
       "min": "0.5",
       "max": "2.0"
     },
     "motor_throttle_tau": {
-      "init": "0.122610",
+      "init": "0.345204",
       "min": "0.02",
       "max": "0.5"
     },
     "motor_min_current_A": {
-      "init": "18",
+      "init": "30.155917",
       "min": "0.0",
       "max": "80.0"
     },
     "motor_T_max": {
-      "init": "255.0000",
+      "init": "329.128504",
       "min": "0.0",
       "max": "1000.0"
     },
     "motor_P_max": {
-      "init": "150000.0000",
+      "init": "240645.520694",
       "min": "0.0",
       "max": "250000.0"
     },
     "gear_ratio": {
-      "init": "10.6500",
+      "init": "8.721565",
       "min": "4.3",
       "max": "11.0"
     },
     "eta_gb": {
-      "init": "0.972846",
+      "init": "0.986340",
       "min": "0.85",
       "max": "0.99"
     },
     "brake_T_max": {
-      "init": "18462.923247",
+      "init": "16291.830520",
       "min": "10000.0",
       "max": "20000.0"
     },
     "brake_tau": {
-      "init": "0.097927",
+      "init": "0.170875",
       "min": "0.01",
       "max": "0.5"
     },
     "brake_p": {
-      "init": "2.056046",
-      "min": "0.5",
-      "max": "3.0"
-    },
-    "brake_kappa": {
-      "init": "0.965199",
-      "min": "0.01",
-      "max": "0.3"
+      "init": "2.062238",
+      "min": "0.2",
+      "max": "5.0"
     },
     "mu": {
-      "init": "0.9",
+      "init": "0.900000",
       "min": "0.5",
       "max": "1.2"
     },
     "wheel_radius": {
-      "init": "0.333681",
+      "init": "0.337385",
       "min": "0.315",
       "max": "0.34"
     },
     "wheel_inertia": {
-      "init": "2.950016",
+      "init": "2.997676",
       "min": "1.0",
       "max": "3"
     }

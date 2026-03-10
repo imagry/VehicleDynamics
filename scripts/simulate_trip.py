@@ -51,7 +51,6 @@ def fitted_to_extended_params(fitted: FittedVehicleParams) -> ExtendedPlantParam
         T_br_max=fitted.brake_T_max,
         p_br=fitted.brake_p,
         tau_br=fitted.brake_tau,
-        kappa_c=fitted.brake_kappa,
         mu=fitted.mu,
     )
     

@@ -38,7 +38,6 @@ class BrakeParams:
     T_br_max: float = 8000.0
     p_br: float = 1.2
     tau_br: float = 0.08
-    kappa_c: float = 0.08
     mu: float = 0.9
 
 
@@ -229,9 +228,7 @@ class ExtendedPlant:
         
         # ===== COMPUTE BRAKE TORQUE EARLY =====
         # Brake dynamics (first-order lag)
-        denom = 1.0 + brake_params.kappa_c * (1.0 - brake_cmd)
-        denom = max(denom, 1e-6)
-        T_br_cmd = brake_params.T_br_max * (brake_cmd ** brake_params.p_br) / denom
+        T_br_cmd = brake_params.T_br_max * (brake_cmd ** brake_params.p_br)
         self.brake_torque += dt / max(brake_params.tau_br, 1e-4) * (T_br_cmd - self.brake_torque)
         
         # Brake torque magnitude at wheel
@@ -470,21 +467,14 @@ class ExtendedPlant:
 
 __all__ = [
     "GRAVITY",
-    
-    
-    
-    
-    
-    
-    
-    
+    "DEFAULT_AIR_DENSITY",
+    "MotorParams",
+    "BrakeParams",
+    "BodyParams",
+    "WheelParams",
     "ExtendedPlantParams",
-    "ExtendedPlantRandomization",
     "ExtendedPlant",
     "ExtendedPlantState",
-    "sample_extended_params",
-    "compute_vehicle_capabilities",
-    "compute_max_accel_at_speed",
 ]
 
 

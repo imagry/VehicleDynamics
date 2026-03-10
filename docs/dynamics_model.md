@@ -14,6 +14,9 @@ The simulation uses an **ExtendedPlant** model that includes:
 - **Minimum Current Floor**: Non-zero current mapping at zero throttle
 - **Current/Power/Voltage Limits**: Multi-constraint enforcement
 
+Related documentation:
+- [Analytic Inverse Feedforward Model](inverse_model.md)
+
 ### System Architecture
 
 ```mermaid
@@ -416,24 +419,21 @@ Where `F_tire` is the tire contact force (see Brake Dynamics section).
 
 #### Brake Torque Command
 
-The brake command `u_br` (0 to 1) is converted to brake torque using a nonlinear function:
+The brake command `u_br` (0 to 1) is converted to brake torque using a nonlinear power law:
 
 ```
-T_br_cmd = T_br_max · (u_br^p) / (1 + κ · (1 - u_br))
+T_br_cmd = T_br_max · (u_br^p)
 ```
 
 Where:
 - `T_br_max`: Maximum brake torque (Nm)
 - `p`: Brake exponent (typically 1.0-1.8)
-- `κ`: Brake slip constant (typically 0.02-0.25)
-
-The denominator term `1 + κ·(1 - u_br)` models slip-dependent brake effectiveness, reducing brake torque at low brake commands.
 
 **Brake Command to Torque:**
 
 ```mermaid
 graph LR
-    A[Brake Command<br/>u_br 0 to 1] --> B[Nonlinear Function<br/>T = T_max · u^p / 1+κ· 1-u]
+    A[Brake Command<br/>u_br 0 to 1] --> B[Nonlinear Function<br/>T = T_max · u^p]
     B --> C[Brake Torque Command<br/>T_br_cmd]
     C --> D[First-Order Lag<br/>τ_br]
     D --> E[Actual Brake Torque<br/>T_br]
@@ -519,7 +519,6 @@ At very low speeds with brakes applied, `ω_m` is clamped to zero to prevent osc
 - `T_br_max`: Maximum brake torque (Nm) - typically 5000-12000 Nm
 - `p_br`: Brake exponent (dimensionless) - typically 1.0-1.8
 - `tau_br`: Brake time constant (s) - typically 0.04-0.12s
-- `kappa_c`: Brake slip constant (dimensionless) - typically 0.02-0.25
 - `mu`: Tire friction coefficient (dimensionless) - typically 0.7-1.0
 
 ### Body Parameters (`BodyParams`)

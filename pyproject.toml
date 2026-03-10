@@ -29,6 +29,7 @@ fetch-trips = "scripts.fetch_trips:main"
 parse-trips = "scripts.parse_trips:main"
 fit-params = "scripts.fit_params:main"
 simulate-trip = "scripts.simulate_trip:main"
+feedforward-trip = "scripts.feedforward_trip:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

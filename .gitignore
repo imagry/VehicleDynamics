@@ -1,2 +1,12 @@
 # Python bytecode cache directories
 __pycache__/
+
+# Workspace/editor settings
+/.vscode/
+
+# Generated data artifacts
+/data/raw/
+/data/processed/
+
+# Fitting outputs
+/fitting/results/

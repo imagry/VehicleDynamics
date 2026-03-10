@@ -32,7 +32,7 @@ PARAM_GROUPS_DC = {
     "Motor": ["motor_V_max", "motor_R", "motor_K", "motor_b", "motor_J", "motor_gamma_throttle", "motor_throttle_tau", "motor_min_current_A"],
     "Motor Limits": ["motor_T_max", "motor_P_max"],
     "Drivetrain": ["gear_ratio", "eta_gb"],
-    "Brake": ["brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu"],
+    "Brake": ["brake_T_max", "brake_tau", "brake_p", "mu"],
     "Wheel": ["wheel_radius", "wheel_inertia"],
 }
 
@@ -45,7 +45,7 @@ PARAM_GROUPS_POLY = {
         "poly_c_30", "poly_c_21", "poly_c_12", "poly_c_03"
     ],
     "Drivetrain": ["gear_ratio", "eta_gb"],
-    "Brake": ["brake_T_max", "brake_tau", "brake_p", "brake_kappa", "mu"],
+    "Brake": ["brake_T_max", "brake_tau", "brake_p", "mu"],
     "Wheel": ["wheel_radius", "wheel_inertia"],
 }
 
@@ -79,7 +79,6 @@ PARAM_DISPLAY = {
     "brake_T_max": ("Brake T_max", "Nm"),
     "brake_tau": ("Brake τ", "s"),
     "brake_p": ("Brake p", ""),
-    "brake_kappa": ("Brake κ", ""),
     "mu": ("Friction μ", ""),
     "wheel_radius": ("Wheel Radius", "m"),
     "wheel_inertia": ("Wheel Inertia", "kg·m²"),
@@ -379,6 +378,13 @@ class FittingGUI:
             variable=self.use_extended_plant_var,
         ).grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=2)
 
+        self.optimize_without_grade_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt_frame,
+            text="Optimize without grade (grade=0)",
+            variable=self.optimize_without_grade_var,
+        ).grid(row=11, column=4, columnspan=2, sticky=tk.W, pady=2, padx=(10, 0))
+
         ttk.Label(opt_frame, text="Plant Substeps:").grid(row=11, column=2, sticky=tk.W, pady=2, padx=(10, 0))
         self.plant_substeps_var = tk.StringVar(value="2")
         ttk.Entry(opt_frame, textvariable=self.plant_substeps_var, width=10).grid(row=11, column=3, sticky=tk.W, padx=5)
@@ -444,6 +450,25 @@ class FittingGUI:
         self.overfit_longest_epochs_var = tk.StringVar(value="1")
         ttk.Entry(opt_frame, textvariable=self.overfit_longest_epochs_var, width=10).grid(row=16, column=3, sticky=tk.W, padx=5)
 
+        self.uniform_bin_loss_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt_frame,
+            text="Uniform (speed, accel) bin loss",
+            variable=self.uniform_bin_loss_var,
+        ).grid(row=17, column=0, columnspan=2, sticky=tk.W, pady=2)
+
+        ttk.Label(opt_frame, text="Speed bins:").grid(row=17, column=2, sticky=tk.W, pady=2, padx=(10, 0))
+        self.speed_bin_count_var = tk.StringVar(value=str(self.default_config.speed_accel_speed_bins))
+        ttk.Entry(opt_frame, textvariable=self.speed_bin_count_var, width=10).grid(row=17, column=3, sticky=tk.W, padx=5)
+
+        ttk.Label(opt_frame, text="Accel bins:").grid(row=17, column=4, sticky=tk.W, pady=2, padx=(10, 0))
+        self.accel_bin_count_var = tk.StringVar(value=str(self.default_config.speed_accel_accel_bins))
+        ttk.Entry(opt_frame, textvariable=self.accel_bin_count_var, width=10).grid(row=17, column=5, sticky=tk.W, padx=5)
+
+        ttk.Label(opt_frame, text="Bin weight cap:").grid(row=18, column=0, sticky=tk.W, pady=2)
+        self.bin_weight_cap_var = tk.StringVar(value=str(self.default_config.speed_accel_bin_weight_cap))
+        ttk.Entry(opt_frame, textvariable=self.bin_weight_cap_var, width=10).grid(row=18, column=1, sticky=tk.W, padx=5)
+
         ttk.Label(opt_frame, text="Phase Order:").grid(row=14, column=2, sticky=tk.W, pady=2, padx=(10, 0))
         self.phase_order_var = tk.StringVar(value="throttle -> brake")
         self.phase_order_combo = ttk.Combobox(
@@ -498,6 +523,11 @@ class FittingGUI:
             button_frame, text="Validation RMSE", command=self._compute_validation_rmse
         )
         self.val_rmse_btn.pack(side=tk.LEFT, padx=5)
+
+        self.speed_accel_dist_btn = ttk.Button(
+            button_frame, text="Data Distribution", command=self._open_speed_accel_distribution_window
+        )
+        self.speed_accel_dist_btn.pack(side=tk.LEFT, padx=5)
 
         self.full_state_btn = ttk.Button(
             button_frame, text="Full-State Throttle", command=self._open_constant_throttle_full_state_window
@@ -671,7 +701,7 @@ class FittingGUI:
         for t in range(n - 1):
             throttle = float(segment.throttle[t]) / 100.0
             brake = float(segment.brake[t]) / 100.0
-            grade = float(segment.grade[t])
+            grade = 0.0 if fitter.config.optimize_without_grade else float(segment.grade[t])
 
             brake_active = brake * 100.0 > fitter.config.brake_deadband_pct
             if brake_active:
@@ -1525,6 +1555,134 @@ class FittingGUI:
         except Exception:
             LOGGER.exception("Failed to compute validation RMSE")
             messagebox.showerror("Validation Error", "Failed to compute validation RMSE")
+
+    def _open_speed_accel_distribution_window(self) -> None:
+        """Open a diagnostic window for speed-accel bin distribution."""
+        try:
+            dataset_rel = self.dataset_var.get()
+            if not dataset_rel:
+                messagebox.showerror("Distribution Error", "Please select a dataset")
+                return
+
+            dataset_path = Path(__file__).parent.parent / dataset_rel
+            if not dataset_path.exists():
+                messagebox.showerror("Distribution Error", f"Dataset not found: {dataset_path}")
+                return
+
+            config = self._create_fitter_config()
+            fitter = VehicleParamFitter(config)
+
+            trips = fitter.load_trip_data(dataset_path)
+            if not trips:
+                messagebox.showerror("Distribution Error", "No trips found in dataset")
+                return
+
+            dt = fitter._estimate_dt(trips)
+            segments = fitter._create_segments(trips, dt)
+            if not segments:
+                messagebox.showerror("Distribution Error", "No valid segments created")
+                return
+
+            if config.downsampling_factor > 1:
+                segments = fitter._downsample_segments(segments, config.downsampling_factor)
+
+            if (
+                config.filter_zero_speed_segments
+                and not config.disable_segment_filtering
+                and config.max_zero_speed_fraction < 1.0
+            ):
+                segments = fitter._filter_zero_speed_segments(
+                    segments,
+                    max_fraction=config.max_zero_speed_fraction,
+                    eps=config.zero_speed_eps,
+                )
+
+            if not segments:
+                messagebox.showerror("Distribution Error", "No segments left after preprocessing")
+                return
+
+            distribution = fitter.compute_speed_accel_distribution(segments)
+            counts = distribution["counts"].astype(np.float64)
+            weight_map = fitter._compute_uniform_weight_map(distribution["counts"])
+            weighted_counts = counts * weight_map
+
+            speed_edges = distribution["speed_edges"]
+            accel_edges = distribution["accel_edges"]
+            nonzero = int(distribution["nonzero_bins"][0])
+            total_samples = int(distribution["total_samples"][0])
+
+            window = tk.Toplevel(self.root)
+            window.title("Speed-Accel Distribution")
+            window.geometry("1280x780")
+
+            frame = ttk.Frame(window)
+            frame.pack(fill=tk.BOTH, expand=True)
+
+            fig = Figure(figsize=(12, 7), dpi=100)
+            ax_counts = fig.add_subplot(1, 2, 1)
+            ax_weighted = fig.add_subplot(1, 2, 2)
+
+            extent = [
+                float(speed_edges[0]),
+                float(speed_edges[-1]),
+                float(accel_edges[0]),
+                float(accel_edges[-1]),
+            ]
+
+            im_counts = ax_counts.imshow(
+                counts.T,
+                origin="lower",
+                aspect="auto",
+                extent=extent,
+                interpolation="nearest",
+            )
+            fig.colorbar(im_counts, ax=ax_counts, label="Samples per bin")
+            ax_counts.set_title("Raw Sample Counts")
+            ax_counts.set_xlabel("Speed (m/s)")
+            ax_counts.set_ylabel("Acceleration (m/s^2)")
+
+            im_weighted = ax_weighted.imshow(
+                weighted_counts.T,
+                origin="lower",
+                aspect="auto",
+                extent=extent,
+                interpolation="nearest",
+            )
+            fig.colorbar(im_weighted, ax=ax_weighted, label="Effective samples per bin")
+            if config.use_uniform_speed_accel_bin_loss:
+                ax_weighted.set_title("Weighted Effective Counts (enabled)")
+            else:
+                ax_weighted.set_title("Weighted Effective Counts (preview)")
+            ax_weighted.set_xlabel("Speed (m/s)")
+            ax_weighted.set_ylabel("Acceleration (m/s^2)")
+
+            nonzero_counts = counts[counts > 0.0]
+            nonzero_weights = weight_map[counts > 0.0]
+            mean_nonzero_count = float(np.mean(nonzero_counts)) if nonzero_counts.size > 0 else 0.0
+            min_weight = float(np.min(nonzero_weights)) if nonzero_weights.size > 0 else 0.0
+            max_weight = float(np.max(nonzero_weights)) if nonzero_weights.size > 0 else 0.0
+            mean_weight = float(np.mean(nonzero_weights)) if nonzero_weights.size > 0 else 0.0
+
+            summary = (
+                f"Samples: {total_samples:,} | Non-empty bins: {nonzero:,} | "
+                f"Mean non-empty count: {mean_nonzero_count:.2f} | "
+                f"Weight range: [{min_weight:.3f}, {max_weight:.3f}] | "
+                f"Mean weight (non-empty bins): {mean_weight:.3f}"
+            )
+            fig.suptitle("Dataset Distribution over (Speed, Acceleration) Bins", fontsize=14)
+            fig.text(0.01, 0.01, summary, ha="left", va="bottom", fontsize=10)
+            fig.tight_layout(rect=(0, 0.04, 1, 0.95))
+
+            canvas = FigureCanvasTkAgg(fig, master=frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+            toolbar = NavigationToolbar2Tk(canvas, frame)
+            toolbar.update()
+
+        except Exception:
+            LOGGER.exception("Failed to open speed-accel distribution window")
+            messagebox.showerror("Distribution Error", "Failed to compute data distribution")
 
     def _show_validation_analysis_window(
         self,
@@ -2431,6 +2589,11 @@ class FittingGUI:
             config_kwargs["validation_split_seed"] = int(seed_raw) if seed_raw else None
             config_kwargs["use_fixed_length_validation"] = bool(self.fixed_length_val_var.get())
             config_kwargs["use_extended_plant"] = bool(self.use_extended_plant_var.get())
+            config_kwargs["optimize_without_grade"] = bool(self.optimize_without_grade_var.get())
+            config_kwargs["use_uniform_speed_accel_bin_loss"] = bool(self.uniform_bin_loss_var.get())
+            config_kwargs["speed_accel_speed_bins"] = int(self.speed_bin_count_var.get())
+            config_kwargs["speed_accel_accel_bins"] = int(self.accel_bin_count_var.get())
+            config_kwargs["speed_accel_bin_weight_cap"] = float(self.bin_weight_cap_var.get())
             config_kwargs["extended_plant_substeps"] = int(self.plant_substeps_var.get())
             config_kwargs["actuator_smoothing_alpha"] = float(self.actuator_smoothing_var.get())
             config_kwargs["actuator_deadband_pct"] = float(self.actuator_deadband_var.get())
@@ -2463,6 +2626,12 @@ class FittingGUI:
                 raise ValueError("Max iterations must be positive")
             if config_kwargs["extended_plant_substeps"] <= 0:
                 raise ValueError("Plant substeps must be positive")
+            if config_kwargs["speed_accel_speed_bins"] <= 0:
+                raise ValueError("Speed bins must be positive")
+            if config_kwargs["speed_accel_accel_bins"] <= 0:
+                raise ValueError("Accel bins must be positive")
+            if config_kwargs["speed_accel_bin_weight_cap"] < 0.0:
+                raise ValueError("Bin weight cap must be non-negative")
             if not (0.0 <= config_kwargs["actuator_smoothing_alpha"] <= 1.0):
                 raise ValueError("Actuator smoothing α must be between 0 and 1")
             if config_kwargs["actuator_deadband_pct"] < 0:
@@ -2574,13 +2743,13 @@ class FittingGUI:
                     fitted.mass, fitted.drag_area, fitted.rolling_coeff,
                     fitted.motor_V_max, fitted.motor_R,
                     fitted.motor_K, fitted.motor_b, fitted.motor_J, fitted.motor_gamma_throttle, fitted.motor_throttle_tau,
-                    fitted.motor_min_current_A,
                     fitted.motor_T_max if fitted.motor_T_max is not None else (fitted.motor_K * (fitted.motor_V_max / max(fitted.motor_R, 1e-4))),
                     fitted.motor_P_max if fitted.motor_P_max is not None else 0.0,
                     fitted.gear_ratio, fitted.eta_gb,
                     fitted.brake_T_max, fitted.brake_tau, fitted.brake_p,
-                    fitted.brake_kappa, fitted.mu,
+                    fitted.mu,
                     fitted.wheel_radius, fitted.wheel_inertia,
+                    fitted.motor_min_current_A,
                 ])
 
             # Use the model type from config (what was actually fitted)
@@ -3094,6 +3263,11 @@ class FittingGUI:
                 
                 # Plant settings
                 "use_extended_plant": self.use_extended_plant_var.get(),
+                "optimize_without_grade": self.optimize_without_grade_var.get(),
+                "use_uniform_speed_accel_bin_loss": self.uniform_bin_loss_var.get(),
+                "speed_accel_speed_bins": self.speed_bin_count_var.get(),
+                "speed_accel_accel_bins": self.accel_bin_count_var.get(),
+                "speed_accel_bin_weight_cap": self.bin_weight_cap_var.get(),
                 "plant_substeps": self.plant_substeps_var.get(),
                 "actuator_smoothing": self.actuator_smoothing_var.get(),
                 "actuator_deadband": self.actuator_deadband_var.get(),
@@ -3223,6 +3397,16 @@ class FittingGUI:
             # Restore plant settings
             if "use_extended_plant" in settings:
                 self.use_extended_plant_var.set(settings["use_extended_plant"])
+            if "optimize_without_grade" in settings:
+                self.optimize_without_grade_var.set(settings["optimize_without_grade"])
+            if "use_uniform_speed_accel_bin_loss" in settings:
+                self.uniform_bin_loss_var.set(settings["use_uniform_speed_accel_bin_loss"])
+            if "speed_accel_speed_bins" in settings:
+                self.speed_bin_count_var.set(settings["speed_accel_speed_bins"])
+            if "speed_accel_accel_bins" in settings:
+                self.accel_bin_count_var.set(settings["speed_accel_accel_bins"])
+            if "speed_accel_bin_weight_cap" in settings:
+                self.bin_weight_cap_var.set(settings["speed_accel_bin_weight_cap"])
             if "plant_substeps" in settings:
                 self.plant_substeps_var.set(settings["plant_substeps"])
             if "actuator_smoothing" in settings:
