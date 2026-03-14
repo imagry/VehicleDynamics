@@ -7,6 +7,7 @@ A modular Python library for simulating vehicle longitudinal dynamics, fitting p
 - **Physics-Based Simulation**: Detailed DC motor + nonlinear brake + wheel dynamics model
 - **Parameter Fitting**: Fit 18+ vehicle parameters from real trip data using trajectory optimization
 - **Interactive GUI**: User-friendly interface for parameter fitting and visualization
+- **Feedforward Comparison GUI**: Open-loop/closed-loop trip comparison with full-state diagnostics
 - **Data Processing**: Tools for fetching and parsing trip data from S3 or local files
 - **Data GUIs**: Separate GUIs for trip fetching and trip parsing workflows
 - **Modular Design**: Clean separation between simulation, fitting, and data handling
@@ -77,6 +78,23 @@ python scripts/feedforward_trip.py \
     --output feedforward_traces.npz
 ```
 
+### Feedforward Comparison GUI
+
+```bash
+# Script entry point
+python scripts/feedforward_compare_gui.py
+
+# Installed console entry point (after pip install -e .)
+feedforward-compare-gui
+```
+
+The comparison GUI supports:
+- Open-loop and closed-loop feedforward comparison on parsed trips
+- GT acceleration Butterworth LPF control (Hz cutoff)
+- Separate throttle/brake feedforward gains
+- Eight diagnostic subplots (speed, accel, throttle, brake, powers, currents, voltages, forces)
+- Vehicle defaults sourced from `fitting/gui_settings.json` parameter init values
+
 ## Documentation
 
 - [Getting Started](docs/getting_started.md) - Installation and quick start
@@ -91,6 +109,7 @@ See the `examples/` directory for:
 - `basic_simulation.py` - Simple simulation example
 - `fit_from_data.py` - Parameter fitting example
 - `gui_usage.py` - GUI usage example
+- `feedforward_gui_usage.py` - Feedforward comparison GUI launcher
 - `custom_vehicle.py` - Custom vehicle configurations
 - `inverse_feedforward.py` - Analytic inverse feedforward example
 

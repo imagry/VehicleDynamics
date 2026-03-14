@@ -42,6 +42,7 @@ Closed-form feedforward inverse that maps target acceleration to signed action.
 - Uses algebraic inversion only (no search/bisection).
 - Does not enforce internal feasibility clipping from physical limits.
 - Applies only final command clipping to `[-1, 1]`.
+- `P_max` is not used in inverse current-span scaling.
 
 #### `InverseFeedforwardResult`
 
@@ -101,6 +102,36 @@ Configuration for parameter fitting.
 - `num_epochs`: Number of training epochs
 - `max_iter`: Maximum optimizer iterations per batch
 - `validation_fraction`: Fraction of data to use for validation
+- `flip_grade_sign_from_data`: Use `-angle` from dataset during fitting
+- `mask_loss_for_abs_grade_gt_2deg`: Mask loss where `|grade| > 2 deg`
+
+#### `FittedVehicleParams`
+
+**Load behavior:**
+- `from_dict` / `load` accepts multiple JSON payload styles:
+    - direct fitted-parameter dictionaries
+    - checkpoint dictionaries with nested `params`
+    - fitter config dictionaries with `*_init` fields
+    - GUI settings dictionaries with `parameters.<name>.init`
+
+### `fitting.feedforward_gui`
+
+#### `FeedforwardComparisonGUI`
+
+Tkinter GUI for feedforward action comparison on parsed trips.
+
+**Core capabilities:**
+- Open-loop and closed-loop comparison modes
+- GT acceleration Butterworth LPF cutoff control
+- Separate throttle/brake feedforward gain scaling
+- Full-state diagnostics including powers, currents, voltages, and longitudinal forces
+- Defaults initialized from `fitting/gui_settings.json` (`parameters.<name>.init`)
+
+**Related helpers:**
+- `run_open_loop_ff_comparison(...)`
+- `run_closed_loop_ff_comparison(...)`
+- `compute_open_loop_metrics(...)`
+- `compute_closed_loop_metrics(...)`
 
 ## Data Handling
 
@@ -235,6 +266,20 @@ python scripts/feedforward_trip.py \
     [--substeps <n>]
 ```
 
+### `scripts/feedforward_compare_gui.py`
+
+Launch the feedforward comparison GUI.
+
+**Usage:**
+```bash
+python scripts/feedforward_compare_gui.py
+```
+
+**Console entry point:**
+```bash
+feedforward-compare-gui
+```
+
 ## Examples
 
 ### `examples/basic_simulation.py`
@@ -268,3 +313,12 @@ The example demonstrates how to:
 
 **Plot Output:**
 Same comprehensive 14-subplot visualization as `scripts/simulate_trip.py` (see above).
+
+### `examples/feedforward_gui_usage.py`
+
+Launches the feedforward comparison GUI from the examples directory.
+
+**Usage:**
+```bash
+python examples/feedforward_gui_usage.py
+```

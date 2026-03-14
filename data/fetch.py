@@ -25,6 +25,7 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_FILES: Sequence[str] = (
     "car_info.json",
+    "aidriver_info.json",
     "driving_mode.csv",
     "rear_left_wheel_speed.csv",
     "rear_right_wheel_speed.csv",

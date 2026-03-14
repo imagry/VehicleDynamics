@@ -446,9 +446,9 @@ graph LR
 
 **Brake Nonlinearity Effect:**
 
-- **Low brake** (u_br = 0.1): Denominator ≈ 1.09, reduces torque by ~9%
-- **Medium brake** (u_br = 0.5): Denominator ≈ 1.045, reduces torque by ~4.5%
-- **High brake** (u_br = 1.0): Denominator = 1.0, full torque
+- **Low brake** (`u_br = 0.1`): torque is `T_br_max * 0.1^p`
+- **Medium brake** (`u_br = 0.5`): torque is `T_br_max * 0.5^p`
+- **High brake** (`u_br = 1.0`): full actuator torque `T_br_max`
 
 #### First-Order Lag
 
@@ -465,26 +465,31 @@ T_br_new = T_br_old + (T_br_cmd - T_br_old) · (dt / τ_br)
 
 Where `τ_br` is the brake time constant (typically 0.04-0.12s).
 
-#### Brake Direction Logic
+#### Brake Hold and Release Logic
 
-Brake torque opposes current motion direction:
+At low speed, braking uses a torque-balance stick/release rule instead of a brake-command threshold.
 
-- **Moving forward** (`v > v_eps`): `τ_brake_wheel = +T_br` (opposes forward)
-- **Moving backward** (`v < -v_eps`): `τ_brake_wheel = -T_br` (opposes backward)
-- **At rest** (`|v| < v_hold`): Smooth interpolation to prevent oscillation
-
-At very low speeds with brakes applied, the vehicle is held at rest (`held_by_brakes = True`), and motor omega is clamped to zero.
-
-#### Tire Force with Friction Limit
-
-The tire contact force is limited by friction:
+1. Compute the free wheel torque (without brake hold):
 
 ```
-F_tire_raw = F_drive - F_brake
-F_tire = clip(F_tire_raw, -μ·m·g, +μ·m·g)
+T_net_free = T_drive_wheel - T_load_wheel
 ```
 
-Where `μ` is the tire friction coefficient (typically 0.7-1.0).
+2. Compute maximum brake hold capacity:
+
+```
+T_hold_max = min(T_brake_actuator, μ * N_normal * r_w)
+```
+
+3. If near standstill and `|T_net_free| <= T_hold_max`, clamp the state to rest:
+
+- `speed = 0`
+- `motor_omega = 0`
+- `held_by_brakes = True`
+
+4. Otherwise, release and integrate normal dynamics with brake torque opposing motion.
+
+This gives physically meaningful behavior on slopes and under low-friction (`mu`) conditions.
 
 ### State Update
 
@@ -495,7 +500,7 @@ The simulation uses a **single-DOF rigid coupling** model where `ω_m` is the si
 3. **Wheel omega**: `ω_w = ω_m / N`
 4. **Position**: `x_new = x_old + v · dt`
 
-At very low speeds with brakes applied, `ω_m` is clamped to zero to prevent oscillation.
+At very low speeds, standstill clamping happens only when torque balance says brakes can hold.
 
 ## Parameters
 
@@ -560,16 +565,8 @@ This allows smaller time steps for numerical stability while maintaining the des
 
 ### Zero-Speed Handling
 
-At very low speeds with brakes applied, the system clamps motor omega to zero to prevent numerical oscillation:
-
-```
-if |v| < v_hold and brake_cmd > threshold:
-    ω_m = 0
-    v = 0
-    held_by_brakes = True
-```
-
-This ensures stable behavior at standstill.
+At very low speeds, the model checks whether brake hold capacity can balance net wheel torque.
+Standstill is enforced only when that torque-balance condition is satisfied.
 
 **Zero-Speed State Machine:**
 
@@ -579,40 +576,10 @@ stateDiagram-v2
     [*] --> Standstill: |v| < v_hold
     
     Moving --> Braking: brake_cmd > 0
-    Braking --> Standstill: |v| < v_hold AND brake_cmd > threshold
-    Standstill --> Moving: throttle > 0 AND |v| > v_hold
+    Braking --> Standstill: |v| < v_stick AND |T_net_free| <= T_hold_max
+    Standstill --> Moving: |T_net_free| > T_hold_max
     
     Standstill: ω_m = 0<br/>v = 0<br/>held_by_brakes = True
     Moving: Normal dynamics<br/>ω_m ≠ 0
-    Braking: Brake applied<br/>ω_m → 0
-```
-
-### Sign Change Prevention
-
-When braking, the system prevents motor omega from crossing zero to avoid oscillation:
-
-```
-if braking and sign(ω_m_old) ≠ sign(ω_m_new):
-    ω_m_new = 0
-```
-
-This maintains stability during brake application at low speeds.
-
-**Sign Change Prevention Logic:**
-
-```mermaid
-graph TB
-    A[Compute ω_m_new] --> B{Braking?}
-    B -->|No| C[Use ω_m_new]
-    B -->|Yes| D{Sign Change?}
-    D -->|No| C
-    D -->|Yes| E[Clamp to Zero<br/>ω_m_new = 0]
-    E --> F[Prevent Oscillation]
-    C --> G[Update State]
-    F --> G
-    
-    style A fill:#e1f5ff
-    style D fill:#fff4e1
-    style E fill:#ffebee
-    style G fill:#e8f5e9
+    Braking: Brake applied<br/>torque-balance check
 ```

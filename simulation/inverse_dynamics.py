@@ -183,11 +183,11 @@ def _equivalent_inertia(params: ExtendedPlantParams) -> float:
 
 def _current_command_upper_bound(params: ExtendedPlantParams) -> float:
     motor = params.motor
+    # Inverse mapping span must follow throttle->current map only.
+    # Do not apply power limit here; forward plant handles P_max dynamically.
     i_upper = motor.V_max / max(motor.R, 1e-9)
     if motor.T_max is not None:
         i_upper = min(i_upper, motor.T_max / max(motor.K_t, 1e-9))
-    if motor.P_max is not None and motor.V_max > 1e-9:
-        i_upper = min(i_upper, motor.P_max / motor.V_max)
     return max(i_upper, 0.0)
 
 

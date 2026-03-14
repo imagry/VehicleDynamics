@@ -363,6 +363,13 @@ class FittingGUI:
         self.full_stop_loss_cap_var = tk.StringVar(value="0.0")
         ttk.Entry(opt_frame, textvariable=self.full_stop_loss_cap_var, width=10).grid(row=10, column=3, sticky=tk.W, padx=5)
 
+        self.mask_high_abs_grade_loss_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt_frame,
+            text="Mask loss for |grade| > 2 deg",
+            variable=self.mask_high_abs_grade_loss_var,
+        ).grid(row=10, column=4, columnspan=2, sticky=tk.W, pady=2, padx=(10, 0))
+
         self.mask_negative_speed_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             opt_frame,
@@ -384,6 +391,13 @@ class FittingGUI:
             text="Optimize without grade (grade=0)",
             variable=self.optimize_without_grade_var,
         ).grid(row=11, column=4, columnspan=2, sticky=tk.W, pady=2, padx=(10, 0))
+
+        self.flip_grade_sign_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt_frame,
+            text="Flip grade sign from data",
+            variable=self.flip_grade_sign_var,
+        ).grid(row=11, column=6, columnspan=2, sticky=tk.W, pady=2, padx=(10, 0))
 
         ttk.Label(opt_frame, text="Plant Substeps:").grid(row=11, column=2, sticky=tk.W, pady=2, padx=(10, 0))
         self.plant_substeps_var = tk.StringVar(value="2")
@@ -1511,10 +1525,18 @@ class FittingGUI:
 
             config = self._create_fitter_config()
             
-            # Reuse existing fitter if available and config matches (faster - segments already loaded)
-            # Otherwise create new fitter
-            if (self.current_fitter is not None 
-                and self.current_fitter._trips is not None 
+            # Reuse existing fitter only when grade/validation-relevant config still matches.
+            # Otherwise recreate segments so validation reflects current GUI settings.
+            config_matches_cached = (
+                self.current_fitter is not None
+                and self.current_fitter.config.optimize_without_grade == config.optimize_without_grade
+                and self.current_fitter.config.flip_grade_sign_from_data == config.flip_grade_sign_from_data
+                and self.current_fitter.config.validation_fraction == config.validation_fraction
+                and self.current_fitter.config.validation_split_seed == config.validation_split_seed
+            )
+
+            if (config_matches_cached
+                and self.current_fitter._trips is not None
                 and self.current_fitter.val_segments):
                 # Reuse existing fitter and segments (much faster)
                 fitter = self.current_fitter
@@ -2573,6 +2595,7 @@ class FittingGUI:
             config_kwargs["accel_loss_weight"] = float(self.accel_weight_var.get())
             config_kwargs["brake_loss_boost"] = float(self.brake_loss_boost_var.get())
             config_kwargs["full_stop_loss_cap_fraction"] = float(self.full_stop_loss_cap_var.get())
+            config_kwargs["mask_loss_for_abs_grade_gt_2deg"] = bool(self.mask_high_abs_grade_loss_var.get())
             config_kwargs["mask_negative_gt_speed"] = bool(self.mask_negative_speed_var.get())
             config_kwargs["apply_lpf_to_fitting_data"] = bool(self.apply_lpf_to_fitting_data_var.get())
             config_kwargs["use_whole_trips"] = bool(self.use_whole_trips_var.get())
@@ -2590,6 +2613,7 @@ class FittingGUI:
             config_kwargs["use_fixed_length_validation"] = bool(self.fixed_length_val_var.get())
             config_kwargs["use_extended_plant"] = bool(self.use_extended_plant_var.get())
             config_kwargs["optimize_without_grade"] = bool(self.optimize_without_grade_var.get())
+            config_kwargs["flip_grade_sign_from_data"] = bool(self.flip_grade_sign_var.get())
             config_kwargs["use_uniform_speed_accel_bin_loss"] = bool(self.uniform_bin_loss_var.get())
             config_kwargs["speed_accel_speed_bins"] = int(self.speed_bin_count_var.get())
             config_kwargs["speed_accel_accel_bins"] = int(self.accel_bin_count_var.get())
@@ -3259,11 +3283,13 @@ class FittingGUI:
                 "accel_weight": self.accel_weight_var.get(),
                 "brake_loss_boost": self.brake_loss_boost_var.get(),
                 "full_stop_loss_cap": self.full_stop_loss_cap_var.get(),
+                "mask_high_abs_grade_loss": self.mask_high_abs_grade_loss_var.get(),
                 "mask_negative_speed": self.mask_negative_speed_var.get(),
                 
                 # Plant settings
                 "use_extended_plant": self.use_extended_plant_var.get(),
                 "optimize_without_grade": self.optimize_without_grade_var.get(),
+                "flip_grade_sign_from_data": self.flip_grade_sign_var.get(),
                 "use_uniform_speed_accel_bin_loss": self.uniform_bin_loss_var.get(),
                 "speed_accel_speed_bins": self.speed_bin_count_var.get(),
                 "speed_accel_accel_bins": self.accel_bin_count_var.get(),
@@ -3391,6 +3417,8 @@ class FittingGUI:
                 self.brake_loss_boost_var.set(settings["brake_loss_boost"])
             if "full_stop_loss_cap" in settings:
                 self.full_stop_loss_cap_var.set(settings["full_stop_loss_cap"])
+            if "mask_high_abs_grade_loss" in settings:
+                self.mask_high_abs_grade_loss_var.set(settings["mask_high_abs_grade_loss"])
             if "mask_negative_speed" in settings:
                 self.mask_negative_speed_var.set(settings["mask_negative_speed"])
             
@@ -3399,6 +3427,8 @@ class FittingGUI:
                 self.use_extended_plant_var.set(settings["use_extended_plant"])
             if "optimize_without_grade" in settings:
                 self.optimize_without_grade_var.set(settings["optimize_without_grade"])
+            if "flip_grade_sign_from_data" in settings:
+                self.flip_grade_sign_var.set(settings["flip_grade_sign_from_data"])
             if "use_uniform_speed_accel_bin_loss" in settings:
                 self.uniform_bin_loss_var.set(settings["use_uniform_speed_accel_bin_loss"])
             if "speed_accel_speed_bins" in settings:

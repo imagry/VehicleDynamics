@@ -224,6 +224,11 @@ The GUI is divided into two main panels:
 - Default: Disabled
 - Useful for filtering out data artifacts or reverse motion
 
+**Mask loss for |grade| > 2 deg**
+- When enabled, ignores loss samples where absolute grade is above 2 degrees
+- Default: Disabled
+- Useful for de-emphasizing steep-grade segments during fitting
+
 #### ExtendedPlant (RL Dynamics) Settings
 
 **Use ExtendedPlant (RL)**
@@ -235,6 +240,14 @@ The GUI is divided into two main panels:
   - Minimum motor current floor at zero throttle
   - Current/power/voltage limits
 - When disabled, uses simplified dynamics (faster but less accurate)
+
+**Optimize without grade**
+- When enabled, fitting rollout forces grade to 0 regardless of dataset angle
+- Useful for identifying non-grade parameters when grade quality is uncertain
+
+**Flip grade sign from data**
+- When enabled, fitter uses `-angle` from dataset files
+- Useful when source data uses opposite grade sign convention
 
 **Plant Substeps**
 - Number of internal simulation substeps per timestep
@@ -495,6 +508,9 @@ The GUI automatically saves and loads settings:
   - Motor model selection
   - All checkboxes and dropdowns
   - Example segment selection
+
+Settings file location:
+- `fitting/gui_settings.json`
 
 ### Tips for Using the GUI
 

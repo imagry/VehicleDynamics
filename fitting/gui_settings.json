@@ -7,7 +7,7 @@
   "max_iter": "1",
   "min_segment_length": "250",
   "max_segment_length": "1000",
-  "apply_lpf_to_fitting_data": false,
+  "apply_lpf_to_fitting_data": true,
   "use_whole_trips": true,
   "filter_zero_speed": false,
   "disable_segment_filter": true,
@@ -16,7 +16,7 @@
   "random_batch": true,
   "random_batches_per_epoch": "100",
   "random_batch_max_iter": "4",
-  "random_segment_length": "1000",
+  "random_segment_length": "3000",
   "validation_fraction": "0.1",
   "validation_seed": "0",
   "optimizer_method": "L-BFGS-B",
@@ -27,9 +27,10 @@
   "accel_weight": "0",
   "brake_loss_boost": "0.0",
   "full_stop_loss_cap": "0.0",
-  "mask_negative_speed": true,
+  "mask_negative_speed": false,
   "use_extended_plant": true,
   "optimize_without_grade": false,
+  "flip_grade_sign_from_data": false,
   "use_uniform_speed_accel_bin_loss": true,
   "speed_accel_speed_bins": "100",
   "speed_accel_accel_bins": "100",
@@ -47,107 +48,107 @@
   "example_segment_index": "0",
   "parameters": {
     "mass": {
-      "init": "2183.739401",
+      "init": "1968.205268",
       "min": "1800.0",
-      "max": "2300.0"
+      "max": "2100.0"
     },
     "drag_area": {
-      "init": "0.949763",
-      "min": "0.4",
-      "max": "1.2"
+      "init": "0.650760",
+      "min": "0.6",
+      "max": "0.75"
     },
     "rolling_coeff": {
-      "init": "0.014395",
+      "init": "0.012247",
       "min": "0.006",
       "max": "0.02"
     },
     "motor_V_max": {
-      "init": "332.344376",
-      "min": "320.0",
-      "max": "400.0"
+      "init": "358.000000",
+      "min": "358",
+      "max": "358"
     },
     "motor_R": {
-      "init": "0.020000",
+      "init": "0.144118",
       "min": "0.02",
       "max": "0.5"
     },
     "motor_K": {
-      "init": "0.226484",
+      "init": "0.306727",
       "min": "0.05",
       "max": "0.5"
     },
     "motor_b": {
-      "init": "0.076916",
+      "init": "0.075810",
       "min": "1e-06",
       "max": "0.1"
     },
     "motor_J": {
-      "init": "0.099692",
+      "init": "0.098860",
       "min": "0.01",
       "max": "0.1"
     },
     "motor_gamma_throttle": {
-      "init": "0.630193",
+      "init": "0.678512",
       "min": "0.5",
       "max": "2.0"
     },
     "motor_throttle_tau": {
-      "init": "0.345204",
+      "init": "0.157134",
       "min": "0.02",
       "max": "0.5"
     },
     "motor_min_current_A": {
-      "init": "30.155917",
+      "init": "33.467948",
       "min": "0.0",
       "max": "80.0"
     },
     "motor_T_max": {
-      "init": "329.128504",
-      "min": "0.0",
-      "max": "1000.0"
+      "init": "255.000000",
+      "min": "255",
+      "max": "255"
     },
     "motor_P_max": {
-      "init": "240645.520694",
-      "min": "0.0",
-      "max": "250000.0"
+      "init": "150000.000000",
+      "min": "150000",
+      "max": "150000"
     },
     "gear_ratio": {
-      "init": "8.721565",
+      "init": "10.126134",
       "min": "4.3",
       "max": "11.0"
     },
     "eta_gb": {
-      "init": "0.986340",
+      "init": "0.987972",
       "min": "0.85",
       "max": "0.99"
     },
     "brake_T_max": {
-      "init": "16291.830520",
+      "init": "15750.232372",
       "min": "10000.0",
       "max": "20000.0"
     },
     "brake_tau": {
-      "init": "0.170875",
-      "min": "0.01",
+      "init": "0.116571",
+      "min": "0.1",
       "max": "0.5"
     },
     "brake_p": {
-      "init": "2.062238",
+      "init": "2.177383",
       "min": "0.2",
       "max": "5.0"
     },
     "mu": {
       "init": "0.900000",
-      "min": "0.5",
-      "max": "1.2"
+      "min": "0.9",
+      "max": "0.9"
     },
     "wheel_radius": {
-      "init": "0.337385",
+      "init": "0.336816",
       "min": "0.315",
       "max": "0.34"
     },
     "wheel_inertia": {
-      "init": "2.997676",
+      "init": "2.994540",
       "min": "1.0",
       "max": "3"
     }

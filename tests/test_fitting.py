@@ -124,6 +124,73 @@ class TestFittedVehicleParams:
         assert params.motor_R == 0.2
         assert params.motor_K == 0.2
         assert params.gear_ratio == 10.0
+
+    def test_from_dict_accepts_checkpoint_payload(self) -> None:
+        """Checkpoint payloads with nested 'params' should load fitted values."""
+        checkpoint_payload = {
+            "epoch": 1,
+            "batch": 12,
+            "params": {
+                "mass": 1987.24,
+                "drag_area": 0.6527,
+                "rolling_coeff": 0.0133,
+                "motor_V_max": 358.0,
+                "motor_R": 0.144118,
+                "motor_K": 0.259758,
+                "motor_b": 0.085836,
+                "motor_J": 0.099422,
+                "motor_gamma_throttle": 0.66908,
+                "motor_throttle_tau": 0.134349,
+                "motor_T_max": 255.0,
+                "motor_P_max": 150000.0,
+                "gear_ratio": 10.64928,
+                "eta_gb": 0.979701,
+                "brake_T_max": 15483.16,
+                "brake_tau": 0.141338,
+                "brake_p": 2.23603,
+                "mu": 0.9,
+                "wheel_radius": 0.335393,
+                "wheel_inertia": 2.99782,
+                "motor_min_current_A": 54.6811,
+            },
+        }
+
+        params = FittedVehicleParams.from_dict(checkpoint_payload)
+        assert params.motor_V_max == 358.0
+        assert params.gear_ratio == pytest.approx(10.64928)
+        assert params.motor_min_current_A == pytest.approx(54.6811)
+
+    def test_from_dict_accepts_config_init_payload(self) -> None:
+        """Config payloads with *_init keys should map to fitted vehicle fields."""
+        config_payload = {
+            "dataset": "data/processed/example.pt",
+            "mass_init": 1968.205268,
+            "drag_area_init": 0.65076,
+            "rolling_coeff_init": 0.012247,
+            "motor_V_max_init": 358.0,
+            "motor_R_init": 0.144118,
+            "motor_K_init": 0.306727,
+            "motor_b_init": 0.07581,
+            "motor_J_init": 0.09886,
+            "motor_gamma_throttle_init": 0.678512,
+            "motor_throttle_tau_init": 0.157134,
+            "motor_min_current_A_init": 80.467948,
+            "motor_T_max_init": 255.0,
+            "motor_P_max_init": 150000.0,
+            "gear_ratio_init": 10.126134,
+            "eta_gb_init": 0.987972,
+            "brake_T_max_init": 15750.232372,
+            "brake_tau_init": 0.116571,
+            "brake_p_init": 2.177383,
+            "mu_init": 0.9,
+            "wheel_radius_init": 0.336816,
+            "wheel_inertia_init": 2.99454,
+        }
+
+        params = FittedVehicleParams.from_dict(config_payload)
+        assert params.motor_V_max == 358.0
+        assert params.mass == pytest.approx(1968.205268)
+        assert params.wheel_inertia == pytest.approx(2.99454)
     
     def test_save_and_load(self, tmp_path: Path) -> None:
         """Test saving and loading to/from JSON file."""
@@ -216,6 +283,8 @@ class TestFitterConfig:
         assert config.min_speed == 0.5
         assert config.max_accel == 6.0
         assert config.optimize_without_grade is False
+        assert config.flip_grade_sign_from_data is False
+        assert config.mask_loss_for_abs_grade_gt_2deg is False
         assert config.use_uniform_speed_accel_bin_loss is False
         assert config.speed_accel_speed_bins == 20
         assert config.speed_accel_accel_bins == 20
@@ -233,6 +302,8 @@ class TestFitterConfig:
             batch_size=10000,
             num_epochs=3,
             optimize_without_grade=True,
+            flip_grade_sign_from_data=True,
+            mask_loss_for_abs_grade_gt_2deg=True,
             use_uniform_speed_accel_bin_loss=True,
             speed_accel_speed_bins=12,
             speed_accel_accel_bins=9,
@@ -248,6 +319,8 @@ class TestFitterConfig:
         assert config.batch_size == 10000
         assert config.num_epochs == 3
         assert config.optimize_without_grade is True
+        assert config.flip_grade_sign_from_data is True
+        assert config.mask_loss_for_abs_grade_gt_2deg is True
         assert config.use_uniform_speed_accel_bin_loss is True
         assert config.speed_accel_speed_bins == 12
         assert config.speed_accel_accel_bins == 9
@@ -447,6 +520,76 @@ class TestVehicleParamFitter:
         fitter_no_grade = VehicleParamFitter(FitterConfig(optimize_without_grade=True))
         accel_uphill_ignored = fitter_no_grade._compute_acceleration(params, speed, throttle, brake, uphill_grade)
         assert np.isclose(accel_uphill_ignored, accel_flat, rtol=0.0, atol=1e-9)
+
+    def test_flip_grade_sign_from_data_in_segments(self) -> None:
+        """Grade sign flip option should invert dataset angle when creating segments."""
+        n = 8
+        grade = np.linspace(-0.05, 0.05, n, dtype=np.float64)
+        trips = {
+            "trip_0": {
+                "speed": np.full(n, 5.0, dtype=np.float64),
+                "acceleration": np.zeros(n, dtype=np.float64),
+                "throttle": np.full(n, 20.0, dtype=np.float64),
+                "brake": np.zeros(n, dtype=np.float64),
+                "angle": grade,
+            }
+        }
+
+        base_cfg = dict(min_segment_length=3, max_segment_length=20, use_whole_trips=True, disable_segment_filtering=True)
+        fitter_normal = VehicleParamFitter(FitterConfig(flip_grade_sign_from_data=False, **base_cfg))
+        fitter_flipped = VehicleParamFitter(FitterConfig(flip_grade_sign_from_data=True, **base_cfg))
+
+        seg_normal = fitter_normal._create_segments(trips, dt=0.1)[0]
+        seg_flipped = fitter_flipped._create_segments(trips, dt=0.1)[0]
+
+        np.testing.assert_allclose(seg_flipped.grade, -seg_normal.grade)
+
+    def test_mask_loss_for_abs_grade_gt_2deg(self) -> None:
+        """When enabled, samples with |grade| > 2 degrees should be excluded from loss."""
+        params = np.array([
+            1800.0,   # mass
+            0.7,      # drag_area
+            0.01,     # rolling_coeff
+            400.0,    # V_max
+            0.2,      # R
+            0.2,      # K
+            0.0005,   # b
+            0.001,    # J
+            1.0,      # gamma_throttle
+            0.1,      # throttle_tau
+            300.0,    # T_max
+            100000.0, # P_max
+            10.0,     # gear_ratio
+            0.92,     # eta
+            15000.0,  # brake_T_max
+            0.08,     # brake_tau
+            1.2,      # brake_p
+            0.9,      # mu
+            0.346,    # wheel_radius
+            1.5,      # wheel_inertia
+            0.0,      # motor_min_current_A
+        ], dtype=np.float64)
+
+        n = 12
+        high_grade = np.full(n, np.deg2rad(3.0), dtype=np.float64)
+        segment = TripSegment(
+            trip_id="grade_mask_test",
+            speed=np.full(n, 15.0, dtype=np.float64),
+            acceleration=np.zeros(n, dtype=np.float64),
+            throttle=np.zeros(n, dtype=np.float64),
+            brake=np.zeros(n, dtype=np.float64),
+            grade=high_grade,
+            dt=0.1,
+        )
+
+        fitter_unmasked = VehicleParamFitter(FitterConfig(mask_loss_for_abs_grade_gt_2deg=False))
+        fitter_masked = VehicleParamFitter(FitterConfig(mask_loss_for_abs_grade_gt_2deg=True))
+
+        loss_unmasked = fitter_unmasked._trajectory_loss(params, [segment])
+        loss_masked = fitter_masked._trajectory_loss(params, [segment])
+
+        assert loss_unmasked > 0.0
+        assert np.isclose(loss_masked, 0.0, rtol=0.0, atol=1e-12)
 
     def test_brake_torque_power_law_in_acceleration_model(self) -> None:
         """Braking in fitter acceleration model should follow T_max * u^p (no kappa)."""

@@ -65,7 +65,7 @@ Required motor current from closed-form inversion:
 
 Throttle-current mapping upper bound (used as scaling only):
 
-`i_upper = min(V_max/R, T_max/K_t if set, P_max/V_max if set)`
+`i_upper = min(V_max/R, T_max/K_t if set)`
 
 `i_floor = max(min_current_A, 0)`
 
@@ -114,5 +114,7 @@ Result object fields include:
 ## Notes
 
 - This inverse model is intentionally "clean" and delay-free.
+- `P_max` is intentionally not used in inverse current-span scaling.
+- Any dynamic power limiting is handled by the forward plant at execution time.
 - Mismatch near hard physical limits is expected because feasibility constraints are not enforced internally.
 - Use `raw_action` for diagnostics and `action` for plant execution.

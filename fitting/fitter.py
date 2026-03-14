@@ -156,12 +156,48 @@ class FittedVehicleParams:
     @classmethod
     def from_dict(cls, d: Dict) -> "FittedVehicleParams":
         """Create from dictionary with backward compatibility."""
+        if not isinstance(d, dict):
+            raise TypeError("Expected a dictionary payload for FittedVehicleParams.from_dict")
+
         # Get valid field names from the dataclass
         valid_fields = {f.name for f in fields(cls)}
+        optional_limit_fields = {"motor_T_max", "motor_P_max"}
+
+        # Work on a copy: callers may reuse the original dict.
+        payload: Dict = dict(d)
+
+        # Accept fitting checkpoint payloads: { ..., "params": { ...fitted values... } }
+        if isinstance(payload.get("params"), dict):
+            payload = dict(payload["params"])
+        else:
+            has_direct_fields = any(k in payload for k in valid_fields)
+
+            # Accept fitter config payloads: { ..., "mass_init": ..., "motor_V_max_init": ... }
+            if not has_direct_fields:
+                init_payload = {
+                    key[: -len("_init")]: value
+                    for key, value in payload.items()
+                    if key.endswith("_init") and key[: -len("_init")] in valid_fields
+                }
+                if init_payload:
+                    payload = init_payload
+                    has_direct_fields = True
+
+            # Accept fitting GUI settings payloads:
+            # { ..., "parameters": {"mass": {"init": "..."}, ...} }
+            if not has_direct_fields and isinstance(payload.get("parameters"), dict):
+                extracted: Dict[str, object] = {}
+                for key, entry in payload["parameters"].items():
+                    if key not in valid_fields or not isinstance(entry, dict):
+                        continue
+                    if "init" in entry:
+                        extracted[key] = entry["init"]
+                if extracted:
+                    payload = extracted
         
         # Handle very old files with motor_force_coeff
-        if "motor_force_coeff" in d:
-            d.pop("motor_force_coeff")
+        if "motor_force_coeff" in payload:
+            payload.pop("motor_force_coeff")
         
         # Default values for backward compatibility
         defaults = {
@@ -186,23 +222,37 @@ class FittedVehicleParams:
         }
 
         # Drop legacy creep fields if present.
-        d.pop("creep_a_max", None)
-        d.pop("creep_v_cutoff", None)
-        d.pop("creep_v_hold", None)
+        payload.pop("creep_a_max", None)
+        payload.pop("creep_v_cutoff", None)
+        payload.pop("creep_v_hold", None)
+
+        # Convert numeric strings (common in GUI-saved settings files).
+        for key, value in list(payload.items()):
+            if not isinstance(value, str):
+                continue
+            text = value.strip()
+            if text == "":
+                if key in optional_limit_fields:
+                    payload[key] = None
+                continue
+            try:
+                payload[key] = float(text)
+            except ValueError:
+                continue
 
         # Handle motor_I_max -> motor_T_max conversion (before filtering)
-        if "motor_I_max" in d and "motor_T_max" not in d and "motor_K" in d:
-            motor_k = float(d.get("motor_K", defaults["motor_K"]))
-            motor_i_max = d.pop("motor_I_max")
-            d["motor_T_max"] = None if motor_i_max is None else float(motor_i_max) * motor_k
+        if "motor_I_max" in payload and "motor_T_max" not in payload and "motor_K" in payload:
+            motor_k = float(payload.get("motor_K", defaults["motor_K"]))
+            motor_i_max = payload.pop("motor_I_max")
+            payload["motor_T_max"] = None if motor_i_max is None else float(motor_i_max) * motor_k
         
         # Remove deprecated/unknown fields (like 'epoch', 'batch', etc.) after handling conversions
-        d = {k: v for k, v in d.items() if k in valid_fields}
+        payload = {k: v for k, v in payload.items() if k in valid_fields}
 
         for key, val in defaults.items():
-            if key not in d:
-                d[key] = val
-        return cls(**d)
+            if key not in payload:
+                payload[key] = val
+        return cls(**payload)
     
     def save(self, path: Path) -> None:
         """Save fitted parameters to JSON file."""
@@ -319,6 +369,8 @@ class FitterConfig:
     speed_accel_accel_range: Tuple[float, float] = (-4.0, 4.0)  # fixed acceleration bounds for bucketization (m/s^2)
     speed_accel_bin_weight_cap: float = 10.0  # clamp for per-sample bucket weights (>0)
     optimize_without_grade: bool = False  # if True, force road grade to 0 during optimization simulation
+    flip_grade_sign_from_data: bool = False  # if True, use -grade for angle values read from dataset
+    mask_loss_for_abs_grade_gt_2deg: bool = False  # if True, ignore loss samples where |grade| > 2 degrees
     mask_negative_gt_speed: bool = False  # ignore loss where GT speed is negative
     full_stop_loss_cap_fraction: float = 0.0  # cap full-stop segment loss as fraction of total (0=off)
     
@@ -1026,7 +1078,8 @@ class VehicleParamFitter:
             a = data["acceleration"]
             th = data["throttle"]
             br = data["brake"]
-            grade = data["angle"]
+            raw_grade = np.asarray(data["angle"], dtype=np.float64)
+            grade = -raw_grade if cfg.flip_grade_sign_from_data else raw_grade
             
             # Apply LPF to speed and acceleration if enabled
             if cfg.apply_lpf_to_fitting_data:
@@ -1175,7 +1228,8 @@ class VehicleParamFitter:
                 a = data["acceleration"]
                 th = data["throttle"]
                 br = data["brake"]
-                grade = data["angle"]
+                raw_grade = np.asarray(data["angle"], dtype=np.float64)
+                grade = -raw_grade if cfg.flip_grade_sign_from_data else raw_grade
                 raw_lengths.append(len(v))
                 if len(v) < cfg.min_segment_length:
                     continue
@@ -1185,7 +1239,7 @@ class VehicleParamFitter:
                     acceleration=np.asarray(a, dtype=np.float64),
                     throttle=np.asarray(th, dtype=np.float64),
                     brake=np.asarray(br, dtype=np.float64),
-                    grade=np.asarray(grade, dtype=np.float64),
+                    grade=grade,
                     dt=dt,
                 ))
 
@@ -1204,13 +1258,15 @@ class VehicleParamFitter:
                         v = np.asarray(data["speed"], dtype=np.float64)
                         if len(v) < relaxed_min:
                             continue
+                        raw_grade = np.asarray(data["angle"], dtype=np.float64)
+                        grade = -raw_grade if cfg.flip_grade_sign_from_data else raw_grade
                         segments.append(TripSegment(
                             trip_id=f"{trip_id}_raw_relaxed",
                             speed=v,
                             acceleration=np.asarray(data["acceleration"], dtype=np.float64),
                             throttle=np.asarray(data["throttle"], dtype=np.float64),
                             brake=np.asarray(data["brake"], dtype=np.float64),
-                            grade=np.asarray(data["angle"], dtype=np.float64),
+                            grade=grade,
                             dt=dt,
                         ))
 
@@ -2419,6 +2475,7 @@ class VehicleParamFitter:
         cfg = self.config
         
         # Use GPU if available
+        grade_mask_threshold_rad = float(np.deg2rad(2.0))
         if (
             self._device is not None
             and len(segments) > 0
@@ -2437,6 +2494,7 @@ class VehicleParamFitter:
             accels_gt_list = []
             brakes_gt_list = []
             throttles_gt_list = []
+            grades_gt_list = []
             for seg in segments:
                 # Speed GT
                 speed_padded = torch.zeros(v_sim_batch.shape[1], device=self._device, dtype=torch.float32)
@@ -2455,11 +2513,16 @@ class VehicleParamFitter:
                 throttle_padded = torch.zeros(v_sim_batch.shape[1], device=self._device, dtype=torch.float32)
                 throttle_padded[:seg.length] = torch.tensor(seg.throttle, device=self._device, dtype=torch.float32)
                 throttles_gt_list.append(throttle_padded)
+
+                grade_padded = torch.zeros(v_sim_batch.shape[1], device=self._device, dtype=torch.float32)
+                grade_padded[:seg.length] = torch.tensor(seg.grade, device=self._device, dtype=torch.float32)
+                grades_gt_list.append(grade_padded)
                 
             speeds_gt = torch.stack(speeds_gt_list)
             accels_gt = torch.stack(accels_gt_list)
             brakes_gt = torch.stack(brakes_gt_list)
             throttles_gt = torch.stack(throttles_gt_list)
+            grades_gt = torch.stack(grades_gt_list)
             
             # Compute squared errors (only where valid)
             speed_errors = (v_sim_batch - speeds_gt) ** 2
@@ -2475,6 +2538,11 @@ class VehicleParamFitter:
                 gt_mask = (speeds_gt >= 0.0).float()
                 weighted_errors = weighted_errors * gt_mask
                 valid_mask = valid_mask * gt_mask
+
+            if cfg.mask_loss_for_abs_grade_gt_2deg:
+                grade_mask = (torch.abs(grades_gt) <= grade_mask_threshold_rad).float()
+                weighted_errors = weighted_errors * grade_mask
+                valid_mask = valid_mask * grade_mask
 
             if cfg.brake_loss_boost > 0.0:
                 brake_active = (brakes_gt > cfg.brake_deadband_pct).float()
@@ -2524,12 +2592,17 @@ class VehicleParamFitter:
                 
                 weighted_se = cfg.speed_loss_weight * se_speed + cfg.accel_loss_weight * se_accel
                 sample_weights = segment.sample_weights if segment.sample_weights is not None else np.ones(segment.length, dtype=np.float64)
+                valid_loss_mask = np.ones(segment.length, dtype=np.float64)
                 if cfg.mask_negative_gt_speed:
                     gt_mask = segment.speed >= 0.0
                     weighted_se = weighted_se * gt_mask
-                    total_samples += float(np.sum(sample_weights * gt_mask))
-                else:
-                    total_samples += float(np.sum(sample_weights))
+                    valid_loss_mask = valid_loss_mask * gt_mask
+                if cfg.mask_loss_for_abs_grade_gt_2deg:
+                    grade_mask = np.abs(segment.grade) <= grade_mask_threshold_rad
+                    weighted_se = weighted_se * grade_mask
+                    valid_loss_mask = valid_loss_mask * grade_mask
+
+                total_samples += float(np.sum(sample_weights * valid_loss_mask))
                 weighted_se = weighted_se * sample_weights
                 if cfg.brake_loss_boost > 0.0:
                     brake_active = segment.brake > cfg.brake_deadband_pct

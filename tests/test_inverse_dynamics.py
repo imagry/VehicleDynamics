@@ -126,7 +126,7 @@ def test_round_trip_drive_and_brake_nominal_regime() -> None:
     assert abs(brake_state.acceleration - target_brake) < 0.2
 
 
-def test_power_limit_parameter_changes_mapping_span() -> None:
+def test_power_limit_parameter_does_not_change_inverse_mapping_span() -> None:
     params_no_pmax = _make_simple_params(p_max=None)
     params_low_pmax = _make_simple_params(p_max=500.0)
 
@@ -137,5 +137,5 @@ def test_power_limit_parameter_changes_mapping_span() -> None:
     raw_no_pmax = inv_no_pmax.compute_action(target_accel=target_accel, speed=0.0).raw_action
     raw_low_pmax = inv_low_pmax.compute_action(target_accel=target_accel, speed=0.0).raw_action
 
-    # Lower P_max reduces mapping span, so same required current maps to a larger command.
-    assert raw_low_pmax > raw_no_pmax
+    # Inverse mapping ignores P_max; same target should map identically.
+    assert math.isclose(raw_low_pmax, raw_no_pmax, rel_tol=0.0, abs_tol=1e-12)

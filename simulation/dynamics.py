@@ -196,6 +196,10 @@ class ExtendedPlant:
         body = self.params.body
 
         # ===== ACTION MAPPING (CURRENT CONTROL) =====
+        # Single signed command convention:
+        #   action > 0: throttle request
+        #   action < 0: brake request
+        #   action = 0: neutral / creep-only behavior via min_current_A
         u = action
         u_th = max(0, u)  # throttle: u > 0
         brake_cmd = max(-u, 0.0)
@@ -225,212 +229,159 @@ class ExtendedPlant:
         # Current and power limits
         I_max = (motor.T_max / max(K_t, 1e-9)) if motor.T_max is not None else (motor.V_max / max(R, 1e-9))
         P_max = motor.P_max
-        
-        # ===== COMPUTE BRAKE TORQUE EARLY =====
-        # Brake dynamics (first-order lag)
+
+        # ===== EXTERNAL FORCES =====
+        # Evaluate load forces from the current rotational state.
+        # This keeps the hold/release decision tied to the same kinematics that
+        # define back-EMF and motor torque in this substep.
+        omega_m_curr = self.motor_omega
+        v_forces = (omega_m_curr / N) * r_w
+        # Quadratic aerodynamic drag (signed to oppose motion).
+        F_drag = 0.5 * body.air_density * body.drag_area * v_forces * abs(v_forces)
+        v_threshold = 0.1
+        # Rolling resistance ramps in near zero speed to avoid a hard discontinuity.
+        roll_factor = min(1.0, abs(v_forces) / v_threshold)
+        F_roll = body.rolling_coeff * body.mass * GRAVITY * roll_factor
+        # Positive grade_rad is uphill, so F_grade > 0 opposes forward motion.
+        grade_rad = self._current_grade_rad if self._current_grade_rad is not None else body.grade_rad
+        F_grade = body.mass * GRAVITY * np.sin(grade_rad)
+
+        # ===== BRAKE ACTUATOR TORQUE =====
+        # Brake map and first-order actuator lag:
+        #   T_br_cmd = T_br_max * u_br^p_br
+        #   dT_br/dt = (T_br_cmd - T_br) / tau_br
         T_br_cmd = brake_params.T_br_max * (brake_cmd ** brake_params.p_br)
         self.brake_torque += dt / max(brake_params.tau_br, 1e-4) * (T_br_cmd - self.brake_torque)
-        
-        # Brake torque magnitude at wheel
-        tau_brake_mag = max(self.brake_torque, 0.0)
+        T_brake_actuator = max(self.brake_torque, 0.0)
 
-        # Current command with a zero-throttle floor.
-        # At 0% throttle -> target_current = min_current_A.
-        # At 100% throttle -> target_current = I_max (subject to power/voltage limits downstream).
+        # ===== VOLTAGE / CURRENT / MOTOR TORQUE =====
+        # Current request is shaped throttle between floor and max current.
+        # The floor allows creep-like behavior at zero throttle when configured.
         i_floor = max(motor.min_current_A, 0.0)
         i_span = max(I_max - i_floor, 0.0)
         target_current = i_floor + u_th_shaped * i_span
 
-        # Compute voltage required to achieve target current
-        omega_m_current = self.motor_omega
-        back_emf = K_e * omega_m_current
+        # Electrical steady-state relation used for command voltage:
+        #   V = R*i + K_e*omega_m
+        back_emf = K_e * omega_m_curr
         v_required = target_current * R + back_emf
         v_applied = min(v_required, motor.V_max) if target_current > 0 else 0.0
         self.V_cmd = max(v_applied, 0.0)
 
-        # Combined inertia at motor shaft for single-DOF rigid coupling:
-        # J_eff = J_m + (J_w + m * r_w^2) / N^2
-        # 
-        # The wheel and vehicle mass inertias are DIVIDED by N² (not multiplied)
-        # because when the motor spins N times faster than the wheel, the 
-        # reflected inertia is reduced by N² (from energy conservation).
-        # 
-        # Energy: 0.5 * J_w * ω_w² = 0.5 * J_w * (ω_m/N)² = 0.5 * (J_w/N²) * ω_m²
-        # Similarly for vehicle mass: 0.5 * m * v² = 0.5 * (m*r_w²/N²) * ω_m²
+        # Combined inertia reflected to motor shaft for the rigid single-DOF chain.
+        # Reflected wheel/vehicle inertia scales as 1/N^2 because omega_m = N * omega_w.
         J_eq = J_m + (J_w + body.mass * r_w ** 2) / (N ** 2)
 
         allow_regen = False
-
-        # ===== KINEMATICS FROM MOTOR STATE =====
-        # omega_m is the single source of truth
-        omega_m = self.motor_omega
-        omega_w = omega_m / N  # wheel angular speed
-        v_from_rot = omega_w * r_w  # vehicle speed derived from rotation
-
-        # ===== COMPUTE TIRE FORCE =====
-        # Tire force opposes motion (positive when opposing forward)
-        # Use friction model based on current state
-        mu_k = brake_params.mu
-        N_normal = body.mass * GRAVITY
-        F_fric_max = mu_k * N_normal
-
-        # External resistive forces (for tire force calculation)
-        F_drag = 0.5 * body.air_density * body.drag_area * v_from_rot * abs(v_from_rot)
-        v_threshold = 0.1
-        roll_factor = min(1.0, abs(v_from_rot) / v_threshold)
-        F_roll = body.rolling_coeff * body.mass * GRAVITY * roll_factor
-        grade_rad = self._current_grade_rad if self._current_grade_rad is not None else body.grade_rad
-        F_grade = body.mass * GRAVITY * np.sin(grade_rad)
-
-        # Tire force is what the ground applies to accelerate the vehicle
-        # F_tire = m * a + F_resist (to achieve acceleration a)
-        # In steady state or quasi-static, F_tire balances resistive forces
-        # For now, compute based on what the motor can provide minus resistances
-        # This will be updated iteratively
-
-        # ===== BRAKE TORQUE DIRECTION LOGIC =====
-        # Brake torque magnitude (already computed above for creep subtraction)
-        # Now determine direction based on vehicle motion
-        tau_brake_mag = max(self.brake_torque, 0.0)
-
-        # Brake torque opposes current motion direction
-        # Sign convention: positive torque in motor equation accelerates motor forward
-        # So brake should apply negative torque if moving forward, positive if backward
-        # At rest, brake should hold the vehicle
-        v_hold = max(wheel.v_eps, 0.05)
-        v_eps = 0.05  # smooth transition zone
-        
-        if abs(v_from_rot) < v_hold and tau_brake_mag > 100.0:
-            # Nearly stopped with brakes applied: clamp motor omega to zero
-            # This prevents oscillation at zero crossing
-            self.held_by_brakes = True
-            # Use a smooth factor that ramps brake effect to zero near zero speed
-            # to prevent discontinuous torque jumps
-            speed_factor = min(1.0, abs(v_from_rot) / max(v_eps, 1e-6))
-            if v_from_rot > 0:
-                tau_brake_wheel = tau_brake_mag * speed_factor
-            elif v_from_rot < 0:
-                tau_brake_wheel = -tau_brake_mag * speed_factor
-            else:
-                tau_brake_wheel = 0.0
-        elif v_from_rot > v_eps:
-            # Moving forward: brake opposes forward motion
-            tau_brake_wheel = tau_brake_mag
-            self.held_by_brakes = False
-        elif v_from_rot < -v_eps:
-            # Moving backward: brake opposes backward motion
-            tau_brake_wheel = -tau_brake_mag
-            self.held_by_brakes = False
-        else:
-            # In transition zone: smooth interpolation
-            speed_factor = v_from_rot / v_eps  # -1 to +1
-            tau_brake_wheel = tau_brake_mag * speed_factor
-            self.held_by_brakes = tau_brake_mag > 100.0
-
-        # ===== COMPUTE TIRE CONTACT TORQUE =====
-        # Tire contact torque at wheel (positive opposes forward motion)
-        # T_tire = F_resist * r_w where F_resist opposes motion
-        T_tire = (F_drag + F_roll + F_grade) * r_w  # Resistive torque at wheel
-
-        # ===== REFLECT WHEEL TORQUES TO MOTOR SHAFT =====
-        # Total wheel opposing torque (at rest, only resistive loads)
-        tau_wheel_opp = tau_brake_wheel + T_tire
-        # Reflected to motor shaft
-        tau_reflected = tau_wheel_opp / max(eta * N, 1e-12)
-
-        # ===== STEADY-STATE CURRENT (NO ELECTRICAL DYNAMICS) =====
-        # Assume steady-state: di/dt = 0, so i = (V_cmd - K_e*omega_m) / R
-        # This matches the logic in compute_max_accel_at_speed()
-        
-        omega_m_curr = self.motor_omega
-        
-        # Track initial omega sign for zero-crossing detection
-        omega_initial_sign = np.sign(omega_m_curr) if abs(omega_m_curr) > 1e-6 else 0
-        
-        # Compute steady-state current from voltage equation
-        # V_cmd = R*i + K_e*omega_m  =>  i = (V_cmd - K_e*omega_m) / R
+        # Quasi-static electrical model: i = (V_cmd - K_e * omega_m) / R.
         i_steady = (self.V_cmd - K_e * omega_m_curr) / max(R, 1e-9)
-        
-        # NO REGEN: clamp negative current to zero
         if not allow_regen:
+            # Enforce no-regeneration behavior in this plant.
             i_steady = max(i_steady, 0.0)
-        
-        # Voltage-limited current (accounts for back EMF)
-        # This is the maximum current that can be drawn given voltage limit and back EMF
-        i_limit_voltage = (motor.V_max - K_e * omega_m_curr) / max(R, 1e-9)
-        # Ensure non-negative
-        i_limit_voltage = max(i_limit_voltage, 0.0)
-        self.i_limit = float(i_limit_voltage)  # Store for state logging (voltage-limited current)
-        
-        # Effective current limit (considering all constraints: voltage, torque, power)
+
+        # Voltage-limited current accounts for back-EMF at the current shaft speed.
+        i_limit_voltage = max((motor.V_max - K_e * omega_m_curr) / max(R, 1e-9), 0.0)
+        self.i_limit = float(i_limit_voltage)
+
+        # Compose final current limit from voltage, torque, and optional power limits.
         i_effective_limit = i_limit_voltage
         if I_max > 0:
             i_effective_limit = min(i_effective_limit, I_max)
         if P_max is not None and self.V_cmd > 1e-6:
             i_effective_limit = min(i_effective_limit, P_max / self.V_cmd)
-        
-        i_new = min(i_steady, i_effective_limit)
-        
-        # Mechanical dynamics: J_eq dω_m/dt = K_t*i - b*ω_m - τ_reflected
-        tau_m_shaft = K_t * i_new
+
+        # Motor-to-wheel torque mapping through gearbox efficiency and ratio.
+        self.motor_current = float(min(i_steady, i_effective_limit))
+        tau_m_shaft = K_t * self.motor_current
+        tau_drive_wheel = eta * N * tau_m_shaft
+        self.drive_torque = float(tau_drive_wheel)
+
+        # ===== STICK / HOLD TORQUE BALANCE =====
+        # Hold window near standstill.
+        v_stick = max(wheel.v_eps, 0.05)
+        # Friction-limited transmissible brake torque at the contact patch.
+        N_normal = body.mass * GRAVITY * np.cos(grade_rad)
+        T_friction_limit = brake_params.mu * N_normal * r_w
+        # Actual hold capacity is limited by both actuator torque and tire-road friction.
+        T_hold_max = min(T_brake_actuator, T_friction_limit)
+
+        # Positive T_load_wheel opposes forward-driving wheel torque.
+        # Free net wheel torque (without brake hold term):
+        #   T_net_free > 0 -> tends to move forward
+        #   T_net_free < 0 -> tends to move backward
+        T_load_wheel = (F_drag + F_roll + F_grade) * r_w
+        T_net_free = tau_drive_wheel - T_load_wheel
+
+        if abs(self.speed) < v_stick and abs(T_net_free) <= T_hold_max:
+            # Stick condition: brakes can fully balance the free net wheel torque.
+            # Result: kinematic state remains exactly at rest for this substep.
+            self.held_by_brakes = True
+            self.speed = 0.0
+            self.acceleration = 0.0
+            self.motor_omega = 0.0
+            self.wheel_omega = 0.0
+            self.back_emf_voltage = 0.0
+            self.position += 0.0
+
+            # Keep force channels coherent in the stuck state.
+            self.drag_force = F_drag
+            self.rolling_force = F_roll
+            self.grade_force = F_grade
+            self.net_force = 0.0
+            self.tire_force = self.drag_force + self.rolling_force + self.grade_force
+            self.slip_ratio = 0.0
+            self._coupling_enabled = True
+
+            self.tau_m_prev = tau_m_shaft
+            self.motor_current_prev = self.motor_current
+            self.drive_torque_prev = self.drive_torque
+            return
+
+        self.held_by_brakes = False
+
+        # ===== BRAKE TORQUE DURING MOTION =====
+        # Once released, brake torque opposes actual motion; if nearly zero speed,
+        # use impending-motion direction from T_net_free.
+        if abs(v_forces) > v_stick:
+            motion_sign = np.sign(v_forces)
+        else:
+            motion_sign = np.sign(T_net_free) if abs(T_net_free) > 1e-9 else 0.0
+
+        # Positive tau_brake_wheel always opposes forward-driving torque.
+        tau_brake_wheel = motion_sign * T_hold_max
+
+        # ===== NORMAL DYNAMICS AFTER RELEASE =====
+        # Wheel-side opposing torque reflected to motor shaft.
+        tau_wheel_opp = tau_brake_wheel + T_load_wheel
+        tau_reflected = tau_wheel_opp / max(eta * N, 1e-12)
+
+        # Single-DOF mechanical dynamics:
+        #   J_eq * domega_m/dt = tau_m_shaft - b*omega_m - tau_reflected
         domega_dt = (tau_m_shaft - b * omega_m_curr - tau_reflected) / max(J_eq, 1e-12)
         omega_m_new = omega_m_curr + dt * domega_dt
-        
-        # Prevent sign change when brakes are applied (would cause oscillation)
-        # If braking and omega is about to cross zero, clamp to zero
+
+        # Prevent sign changes under active brake command to avoid low-speed chatter.
+        omega_initial_sign = np.sign(omega_m_curr) if abs(omega_m_curr) > 1e-6 else 0.0
         if brake_cmd > 0.1:
-            if omega_initial_sign > 0 and omega_m_new < 0:
+            if omega_initial_sign > 0.0 and omega_m_new < 0.0:
                 omega_m_new = 0.0
-            elif omega_initial_sign < 0 and omega_m_new > 0:
+            elif omega_initial_sign < 0.0 and omega_m_new > 0.0:
                 omega_m_new = 0.0
 
-        # ===== UPDATE MOTOR STATE =====
-        self.motor_current = float(i_new)
+        # Propagate rigid kinematics from motor state (single source of truth).
         self.motor_omega = float(omega_m_new)
         self.back_emf_voltage = K_e * self.motor_omega
+        self.wheel_omega = self.motor_omega / N
 
-        # ===== COMPUTE DRIVE TORQUE AT WHEEL =====
-        tau_m_shaft = K_t * self.motor_current
-        tau_drive_wheel = eta * N * tau_m_shaft  # positive forward
+        v_old = self.speed
+        v_new = self.wheel_omega * r_w
+        self.speed = float(v_new)
+        self.acceleration = (v_new - v_old) / max(dt, 1e-6)
+        self.position += self.speed * dt
 
-        # Save for diagnostics
-        self.drive_torque = float(tau_drive_wheel)
         self.tau_m_prev = tau_m_shaft
         self.motor_current_prev = self.motor_current
         self.drive_torque_prev = self.drive_torque
-
-        # ===== COMPUTE WHEEL FORCE CHANNELS =====
-        # Raw wheel-contact force channel from post-constraint motor torque and applied brake torque.
-        # This is kept for internal mechanics visibility; reported tire_force/net_force are finalized
-        # later from realized acceleration so that net_force == m * acceleration by construction.
-        F_drive = tau_drive_wheel / r_w  # positive forward
-
-        # tau_brake_wheel is signed (positive opposes forward, negative opposes backward)
-        # F_brake is signed brake force at the tire contact patch.
-        F_brake = tau_brake_wheel / r_w
-        F_tire_raw = F_drive - F_brake
-
-        # ===== DERIVE VEHICLE STATE FROM MOTOR (SINGLE SOURCE OF TRUTH) =====
-        # Speed comes directly from omega_m
-        v_old = self.speed
-        v_new = (self.motor_omega / N) * r_w
-        
-        # ===== HELD BY BRAKES / ZERO SPEED CLAMPING =====
-        # If brakes are applied and speed is very low, clamp to zero to prevent oscillation
-        v_hold_clamp = max(wheel.v_eps, 0.05)
-        if brake_cmd > 0.4 and abs(v_new) < v_hold_clamp:
-            # Clamp motor omega to zero (vehicle held)
-            self.motor_omega = 0.0
-            v_new = 0.0
-            self.held_by_brakes = True
-            self.acceleration = 0.0
-            self.back_emf_voltage = 0.0
-        else:
-            self.held_by_brakes = False
-            # Compute acceleration from actual speed change (single-DOF consistent)
-            self.acceleration = (v_new - v_old) / max(dt, 1e-6)
-        
-        self.speed = float(v_new)
 
         # ===== FINALIZE REPORTED FORCE DIAGNOSTICS (REALIZED STATE) =====
         # Recompute opposing forces from realized vehicle speed for consistent reporting.
@@ -446,18 +397,13 @@ class ExtendedPlant:
         self.net_force = body.mass * self.acceleration
         self.tire_force = self.net_force + self.drag_force + self.rolling_force + self.grade_force
 
-        # Wheel omega follows motor
-        self.wheel_omega = self.motor_omega / N
-
-        # Update position
-        self.position += self.speed * dt
-
         # Coupling is always enabled in single-DOF model
         self._coupling_enabled = True
 
         # Compute slip ratio (for diagnostics)
         # In single-DOF model, wheel and vehicle are rigidly coupled, so slip is minimal
         wheel_linear_speed = self.wheel_omega * wheel.radius
+        # Guard denominator near zero to avoid numerical blow-up at standstill.
         v_ref = max(abs(self.speed), wheel.v_eps)
         self.slip_ratio = (wheel_linear_speed - self.speed) / v_ref
 

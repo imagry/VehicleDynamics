@@ -110,6 +110,26 @@ python scripts/simulate_trip.py \
     --output simulation_results.npz
 ```
 
+### 4. Compare Feedforward Open-Loop vs Closed-Loop
+
+Launch the dedicated feedforward comparison GUI:
+
+```bash
+# Script
+python scripts/feedforward_compare_gui.py
+
+# Console entry point (after pip install -e .)
+feedforward-compare-gui
+```
+
+What this GUI provides:
+- Open-loop and closed-loop feedforward comparison against trip data
+- GT acceleration Butterworth filtering with cutoff control in Hz
+- Separate throttle and brake feedforward gain sliders
+- Full-state diagnostics in an 8-subplot layout (2 columns)
+
+Parameter loading supports fitted params JSON, fitter `config.json`, and `fitting_checkpoint.json` payloads.
+
 #### Visualization Options
 
 Both the simulation script and examples support comprehensive plotting of all simulation states:
