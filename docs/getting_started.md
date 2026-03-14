@@ -15,17 +15,11 @@ This guide will help you get started with the vehicle simulation repository.
 # Clone or navigate to the repository
 cd simulation_repo
 
-# Install in development mode
-pip install -e .
+# Create venv and install project (dev deps by default)
+bash setup.sh
 
-# Or install with development dependencies
-pip install -e ".[dev]"
-```
-
-### Install Dependencies Only
-
-```bash
-pip install -r requirements.txt
+# Runtime-only install (without dev extras)
+INSTALL_DEV=0 bash setup.sh
 ```
 
 ## Quick Start

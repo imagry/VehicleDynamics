@@ -17,9 +17,11 @@ A modular Python library for simulating vehicle longitudinal dynamics, fitting p
 ### Installation
 
 ```bash
-pip install -r requirements.txt
-# Or install as package:
-pip install -e .
+# Create venv and install project (dev deps by default)
+bash setup.sh
+
+# Runtime-only install (without dev extras)
+INSTALL_DEV=0 bash setup.sh
 ```
 
 ### Basic Usage
@@ -148,5 +150,5 @@ pytest tests/test_simulation.py
 - matplotlib (for visualization)
 - tkinter (for GUI, included with Python)
 
-See `requirements.txt` for complete list.
+See `pyproject.toml` for the complete dependency list.
 
