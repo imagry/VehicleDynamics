@@ -1,6 +1,6 @@
 {
   "dataset": "data\\processed\\NiroEV\\unknown_vehicle\\all_trips_data.pt",
-  "trip": "2025-08-03T13_45_12_seg8",
+  "trip": "2025-11-04T12_14_14_seg1",
   "mode": "closed_loop",
   "use_trip_grade": true,
   "substeps": "1",

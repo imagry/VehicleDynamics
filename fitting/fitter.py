@@ -778,14 +778,21 @@ class VehicleParamFitter:
             fig.savefig(f"{out_base}.png")
             plt.close(fig)
 
-    def _apply_actuator_deadband(self, signal: np.ndarray) -> np.ndarray:
-        """Apply deadband to actuator signal (values below threshold set to 0)."""
-        deadband = self.config.actuator_deadband_pct
+    def _apply_deadband(self, signal: np.ndarray, deadband: float) -> np.ndarray:
+        """Apply deadband to signal (values below threshold set to 0)."""
         if deadband <= 0:
             return signal
         cleaned = signal.copy()
         cleaned[cleaned < deadband] = 0.0
         return cleaned
+
+    def _apply_actuator_deadband(self, signal: np.ndarray) -> np.ndarray:
+        """Apply throttle deadband."""
+        return self._apply_deadband(signal, self.config.actuator_deadband_pct)
+
+    def _apply_brake_deadband(self, signal: np.ndarray) -> np.ndarray:
+        """Apply brake deadband."""
+        return self._apply_deadband(signal, self.config.brake_deadband_pct)
 
     def _smooth_actuator_signal(self, signal: np.ndarray) -> np.ndarray:
         """Apply exponential smoothing to actuator signal."""
@@ -958,9 +965,14 @@ class VehicleParamFitter:
                     throttle[brake_active] = 0.0
 
                 throttle = self._apply_actuator_deadband(throttle)
-                brake = self._apply_actuator_deadband(brake)
+                brake = self._apply_brake_deadband(brake)
                 throttle = self._smooth_actuator_signal(throttle)
                 brake = self._smooth_actuator_signal(brake)
+
+                # Re-apply deadbands after smoothing so no sub-threshold tails survive.
+                throttle = self._apply_actuator_deadband(throttle)
+                brake = self._apply_brake_deadband(brake)
+
                 throttle = np.clip(throttle, 0.0, 100.0)
                 brake = np.clip(brake, 0.0, 100.0)
 

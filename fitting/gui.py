@@ -419,6 +419,10 @@ class FittingGUI:
         self.actuator_deadband_var = tk.StringVar(value="1.0")
         ttk.Entry(opt_frame, textvariable=self.actuator_deadband_var, width=10).grid(row=12, column=3, sticky=tk.W, padx=5)
 
+        ttk.Label(opt_frame, text="Brake Deadband (%):").grid(row=12, column=4, sticky=tk.W, pady=2, padx=(10, 0))
+        self.brake_deadband_var = tk.StringVar(value=str(self.default_config.brake_deadband_pct))
+        ttk.Entry(opt_frame, textvariable=self.brake_deadband_var, width=10).grid(row=12, column=5, sticky=tk.W, padx=5)
+
         ttk.Label(opt_frame, text="Max |Accel| (m/s²):").grid(row=13, column=0, sticky=tk.W, pady=2)
         self.max_accel_var = tk.StringVar(value=str(self.default_config.max_accel))
         ttk.Entry(opt_frame, textvariable=self.max_accel_var, width=10,).grid(row=13, column=1, sticky=tk.W, padx=5)
@@ -2621,6 +2625,7 @@ class FittingGUI:
             config_kwargs["extended_plant_substeps"] = int(self.plant_substeps_var.get())
             config_kwargs["actuator_smoothing_alpha"] = float(self.actuator_smoothing_var.get())
             config_kwargs["actuator_deadband_pct"] = float(self.actuator_deadband_var.get())
+            config_kwargs["brake_deadband_pct"] = float(self.brake_deadband_var.get())
             config_kwargs["max_accel"] = float(self.max_accel_var.get())
             config_kwargs["use_param_scaling"] = bool(self.use_param_scaling_var.get())
             config_kwargs["optimizer_method"] = str(self.optimizer_method_var.get()).strip()
@@ -2660,6 +2665,8 @@ class FittingGUI:
                 raise ValueError("Actuator smoothing α must be between 0 and 1")
             if config_kwargs["actuator_deadband_pct"] < 0:
                 raise ValueError("Actuator deadband must be non-negative")
+            if config_kwargs["brake_deadband_pct"] < 0:
+                raise ValueError("Brake deadband must be non-negative")
             if config_kwargs["max_accel"] <= 0:
                 raise ValueError("Max accel must be positive")
             if config_kwargs["brake_loss_boost"] < 0:
@@ -3297,6 +3304,7 @@ class FittingGUI:
                 "plant_substeps": self.plant_substeps_var.get(),
                 "actuator_smoothing": self.actuator_smoothing_var.get(),
                 "actuator_deadband": self.actuator_deadband_var.get(),
+                "brake_deadband": self.brake_deadband_var.get(),
                 "max_accel": self.max_accel_var.get(),
                 "use_param_scaling": self.use_param_scaling_var.get(),
                 
@@ -3443,6 +3451,11 @@ class FittingGUI:
                 self.actuator_smoothing_var.set(settings["actuator_smoothing"])
             if "actuator_deadband" in settings:
                 self.actuator_deadband_var.set(settings["actuator_deadband"])
+            if "brake_deadband" in settings:
+                self.brake_deadband_var.set(settings["brake_deadband"])
+            elif "actuator_deadband" in settings:
+                # Backward compatibility with settings files from before dedicated brake deadband.
+                self.brake_deadband_var.set(settings["actuator_deadband"])
             if "max_accel" in settings:
                 self.max_accel_var.set(settings["max_accel"])
             if "use_param_scaling" in settings:
